@@ -21,6 +21,12 @@ internal sealed class DesktopNoteData
     public byte BackgroundOpacity { get; set; } = 96;
     public bool FollowThemeColor { get; set; } = true;
     public bool IsFloating { get; set; }
+    public string FontFamily { get; set; } = "Microsoft JhengHei UI";
+    public float FontSize { get; set; } = 11F;
+    public bool FontBold { get; set; }
+    public int LineHeight { get; set; } = 30;
+    public int LineSpacing { get; set; }
+    public int CornerRadius { get; set; }
 
     public Rectangle Bounds
     {

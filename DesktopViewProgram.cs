@@ -356,6 +356,7 @@ internal sealed class DesktopViewApplicationContext : ApplicationContext
         var form = new DesktopLayeredNoteForm(note);
         form.EditRequested += (_, _) => EditNote(form);
         form.DeleteRequested += (_, _) => DeleteNote(form);
+        form.AddNoteRequested += (_, e) => CreateNote(e.ScreenLocation);
         form.NoteChanged += (_, _) => SaveNotes();
         _noteForms.Add(form);
         form.Show();
@@ -1083,10 +1084,21 @@ internal static class SmokeTests
             Assert(referenced.Count == 1 && File.Exists(referenceFile), "custom list references without moving source");
             Directory.Delete(referenceRoot, recursive: true);
 
-            using (var appearance = new OverlayAppearanceDialog(Color.Black, 80, false))
+            using (var appearance = new OverlayStyleDialog(new OverlayStyleOptions
             {
-                var themeOption = appearance.Controls.OfType<CheckBox>().Single();
-                Assert(themeOption.Text.Contains("Windows 主題顏色") && themeOption.Width >= 300, "theme color option is visible");
+                BackgroundColor = Color.Black,
+                BackgroundOpacity = 80,
+                FollowThemeColor = false,
+                FontSize = 12,
+                Bold = true,
+                LineHeight = 38,
+                LineSpacing = 4,
+                CornerRadius = 18
+            }, "清單"))
+            {
+                var themeOption = appearance.Controls.Cast<Control>().SelectMany(Descendants).OfType<CheckBox>().Single();
+                Assert(themeOption.Text.Contains("Windows 系統顏色"), "system color option is visible");
+                Assert(appearance.SelectedStyle.Bold && appearance.SelectedStyle.CornerRadius == 18, "extended style values round trip");
                 var appearanceQa = Environment.GetEnvironmentVariable("DESKTOP_LIST_QA_APPEARANCE_PATH");
                 if (!string.IsNullOrWhiteSpace(appearanceQa))
                 {
@@ -1124,6 +1136,7 @@ internal static class SmokeTests
             var note = new DesktopNoteData { Text = "第一段\r\n第二段", X = 40, Y = 40, Width = 320, Height = 240 };
             using (var noteForm = new DesktopLayeredNoteForm(note))
             {
+                Assert(noteForm.ContextMenuLabels.Contains("新增便籤…") && noteForm.ContextMenuLabels.Contains("樣式…"), "note menu exposes new note and style");
                 noteForm.ApplyEditedContent(note.Text,
                 [
                     new DesktopChecklistItem { Text = "已完成", Completed = true },
@@ -1147,6 +1160,9 @@ internal static class SmokeTests
         if (!condition)
             throw new InvalidOperationException($"Assertion failed: {name}");
     }
+
+    private static IEnumerable<Control> Descendants(Control control) =>
+        control.Controls.Cast<Control>().SelectMany(child => new[] { child }.Concat(Descendants(child)));
 
     [DllImport("user32.dll")]
     private static extern IntPtr SendMessage(IntPtr window, int message, IntPtr wParam, IntPtr lParam);

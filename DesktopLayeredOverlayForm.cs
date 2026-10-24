@@ -1,4 +1,4 @@
-// 功能：以逐像素透明視窗顯示桌面項目、小圖示與純白文字，並提供整列點擊、空白拖曳及外框縮放。
+// 功能：以逐像素透明視窗顯示桌面項目、小圖示與可獨立保存的完整字型／間距／圓角樣式。
 // 使用：由 DesktopListTool 的 --list compact|standard|large 入口建立；位置、範圍與項目尺寸自動保存。
 // 設定：滑鼠靠近時顯示邊框；項目可拖曳排序、移入資料夾或按 Ctrl 複製，右鍵使用 Windows 原生檔案選單。
 
@@ -34,6 +34,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
     private Color _backgroundColor;
     private byte _backgroundOpacity;
     private bool _followThemeColor;
+    private OverlayStyleOptions _style = null!;
     private Point _lastContextMenuScreenPoint;
     private bool _isFloating;
     private Point _dragStart;
@@ -72,7 +73,16 @@ internal sealed class DesktopLayeredOverlayForm : Form
         DoubleBuffered = false;
         AllowDrop = true;
         (_sortMode, _sortAscending) = OverlayOrderSettings.LoadSort(SettingsIdentity);
-        (_backgroundColor, _backgroundOpacity, _followThemeColor) = OverlayAppearanceSettings.Load(SettingsIdentity);
+        _style = OverlayAppearanceSettings.LoadStyle(SettingsIdentity, DefaultStyle(itemSize));
+        var qaStyleJson = Environment.GetEnvironmentVariable("DESKTOP_LIST_QA_STYLE_JSON");
+        if (!string.IsNullOrWhiteSpace(qaStyleJson))
+        {
+            try { _style = System.Text.Json.JsonSerializer.Deserialize<OverlayStyleOptions>(qaStyleJson) ?? _style; }
+            catch (System.Text.Json.JsonException) { }
+        }
+        _backgroundColor = _style.FollowThemeColor ? OverlayAppearanceSettings.GetWindowsThemeColor() : _style.BackgroundColor;
+        _backgroundOpacity = _style.BackgroundOpacity;
+        _followThemeColor = _style.FollowThemeColor;
         _frameVisible = Environment.GetEnvironmentVariable("DESKTOP_LIST_QA_SHOW_FRAME") == "1";
         _isFloating = Environment.GetEnvironmentVariable("DESKTOP_LIST_QA_FLOATING") == "1";
         SystemEvents.UserPreferenceChanged += HandleUserPreferenceChanged;
@@ -153,15 +163,9 @@ internal sealed class DesktopLayeredOverlayForm : Form
             ListItemSize.Large => 32,
             _ => 24
         };
-        var fontSize = size switch
-        {
-            ListItemSize.Compact => 9F,
-            ListItemSize.Large => 12F,
-            _ => 10F
-        };
         _itemFont?.Dispose();
-        _itemFont = new Font("Microsoft JhengHei UI", fontSize, FontStyle.Regular, GraphicsUnit.Point);
-        _rowHeight = Math.Max(_iconSize + 12, (int)Math.Ceiling(_itemFont.GetHeight()) + 12);
+        _itemFont = OverlayStyleDialog.CreateFont(_style);
+        _rowHeight = Math.Max(Math.Max(_iconSize + 12, _style.LineHeight), (int)Math.Ceiling(_itemFont.GetHeight()) + 8) + _style.LineSpacing;
         _columnWidth = CalculateColumnWidth();
         ListItemSizeSettings.Save(size);
         UpdateMinimumSize();
@@ -169,6 +173,14 @@ internal sealed class DesktopLayeredOverlayForm : Form
         RevealFrame();
         RenderLayer();
     }
+
+    private static OverlayStyleOptions DefaultStyle(ListItemSize size) => new()
+    {
+        BackgroundColor = Color.Black,
+        BackgroundOpacity = 0,
+        FontSize = size switch { ListItemSize.Compact => 9F, ListItemSize.Large => 12F, _ => 10F },
+        LineHeight = size switch { ListItemSize.Compact => 28, ListItemSize.Large => 46, _ => 36 }
+    };
 
     public void RevealFrame()
     {
@@ -397,7 +409,10 @@ internal sealed class DesktopLayeredOverlayForm : Form
             graphics.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
             var effectiveAlpha = Math.Max(1, (int)_backgroundOpacity);
             using var hitTargetBrush = new SolidBrush(Color.FromArgb(effectiveAlpha, _backgroundColor));
-            graphics.FillRectangle(hitTargetBrush, ClientRectangle);
+            if (_style.CornerRadius > 0)
+                graphics.FillRoundedRectangle(hitTargetBrush, ClientRectangle, Math.Min(_style.CornerRadius, Math.Min(ClientSize.Width, ClientSize.Height) / 2));
+            else
+                graphics.FillRectangle(hitTargetBrush, ClientRectangle);
 
             if (UseHorizontalLayout)
                 DrawHorizontalEntries(graphics);
@@ -409,7 +424,9 @@ internal sealed class DesktopLayeredOverlayForm : Form
             if (_frameVisible)
             {
                 using var framePen = new Pen(Color.FromArgb(225, 96, 165, 250), 2F);
-                graphics.DrawRectangle(framePen, 1, 1, ClientSize.Width - 3, ClientSize.Height - 3);
+                var frameBounds = new Rectangle(1, 1, ClientSize.Width - 3, ClientSize.Height - 3);
+                if (_style.CornerRadius > 0) graphics.DrawRoundedRectangle(framePen, frameBounds, Math.Min(_style.CornerRadius, Math.Min(frameBounds.Width, frameBounds.Height) / 2));
+                else graphics.DrawRectangle(framePen, frameBounds);
                 using var gripBrush = new SolidBrush(Color.FromArgb(235, 96, 165, 250));
                 graphics.FillRectangle(gripBrush, ClientSize.Width - 14, ClientSize.Height - 14, 11, 11);
             }
@@ -530,8 +547,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
         menu.Items.Add(sortMenu);
         menu.Items.Add("反轉排序", null, (_, _) => { _sortAscending = !_sortAscending; SaveSortAndReload(); });
         menu.Items.Add(new ToolStripSeparator());
-        menu.Items.Add("背景顏色與透明度…", null, (_, _) => EditBackground());
-        menu.Items.Add("恢復完全透明", null, (_, _) => SetBackground(_backgroundColor, 0, false, save: true));
+        menu.Items.Add("樣式…", null, (_, _) => EditStyle());
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("新增資料夾清單…", null, (_, _) => AddFolderRequested?.Invoke(this, EventArgs.Empty));
         menu.Items.Add("新增便籤…", null, (_, _) => AddNoteRequested?.Invoke(this, new NoteRequestedEventArgs(_lastContextMenuScreenPoint)));
@@ -543,27 +559,32 @@ internal sealed class DesktopLayeredOverlayForm : Form
         return menu;
     }
 
-    private void EditBackground()
+    private void EditStyle()
     {
-        var originalColor = _backgroundColor;
-        var originalOpacity = _backgroundOpacity;
-        var originalFollowTheme = _followThemeColor;
-        using var dialog = new OverlayAppearanceDialog(_backgroundColor, _backgroundOpacity, _followThemeColor);
-        dialog.PreviewChanged += (_, _) => SetBackground(dialog.SelectedColor, dialog.SelectedOpacity, dialog.FollowThemeColor, save: false);
+        var original = _style.Clone();
+        using var dialog = new OverlayStyleDialog(_style.Clone(), "清單");
+        dialog.PreviewChanged += (_, _) => ApplyStyle(dialog.SelectedStyle, save: false);
         if (dialog.ShowDialog(this) == DialogResult.OK)
-            SetBackground(dialog.SelectedColor, dialog.SelectedOpacity, dialog.FollowThemeColor, save: true);
+            ApplyStyle(dialog.SelectedStyle, save: true);
         else
-            SetBackground(originalColor, originalOpacity, originalFollowTheme, save: false);
+            ApplyStyle(original, save: false);
     }
 
-    private void SetBackground(Color color, byte opacity, bool followTheme, bool save)
+    private void ApplyStyle(OverlayStyleOptions style, bool save)
     {
-        _followThemeColor = followTheme;
-        var effectiveColor = followTheme ? OverlayAppearanceSettings.GetWindowsThemeColor() : color;
+        _style = style.Clone();
+        _followThemeColor = _style.FollowThemeColor;
+        var effectiveColor = _followThemeColor ? OverlayAppearanceSettings.GetWindowsThemeColor() : _style.BackgroundColor;
         _backgroundColor = Color.FromArgb(effectiveColor.R, effectiveColor.G, effectiveColor.B);
-        _backgroundOpacity = opacity;
+        _backgroundOpacity = _style.BackgroundOpacity;
+        _itemFont?.Dispose();
+        _itemFont = OverlayStyleDialog.CreateFont(_style);
+        _rowHeight = Math.Max(Math.Max(_iconSize + 12, _style.LineHeight), (int)Math.Ceiling(_itemFont.GetHeight()) + 8) + _style.LineSpacing;
+        _columnWidth = CalculateColumnWidth();
+        UpdateMinimumSize();
+        ClampScroll();
         if (save)
-            OverlayAppearanceSettings.Save(SettingsIdentity, _backgroundColor, _backgroundOpacity, _followThemeColor);
+            OverlayAppearanceSettings.SaveStyle(SettingsIdentity, _style);
         RenderLayer();
     }
 
@@ -606,6 +627,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
         if (!_followThemeColor || IsDisposed)
             return;
         _backgroundColor = OverlayAppearanceSettings.GetWindowsThemeColor();
+        _style.BackgroundColor = _backgroundColor;
         if (IsHandleCreated)
             BeginInvoke(RenderLayer);
     }
@@ -1060,5 +1082,17 @@ internal static class GraphicsExtensions
         path.AddArc(bounds.Left, bounds.Bottom - diameter, diameter, diameter, 90, 90);
         path.CloseFigure();
         graphics.FillPath(brush, path);
+    }
+
+    public static void DrawRoundedRectangle(this Graphics graphics, Pen pen, Rectangle bounds, int radius)
+    {
+        using var path = new GraphicsPath();
+        var diameter = radius * 2;
+        path.AddArc(bounds.Left, bounds.Top, diameter, diameter, 180, 90);
+        path.AddArc(bounds.Right - diameter, bounds.Top, diameter, diameter, 270, 90);
+        path.AddArc(bounds.Right - diameter, bounds.Bottom - diameter, diameter, diameter, 0, 90);
+        path.AddArc(bounds.Left, bounds.Bottom - diameter, diameter, diameter, 90, 90);
+        path.CloseFigure();
+        graphics.DrawPath(pen, path);
     }
 }

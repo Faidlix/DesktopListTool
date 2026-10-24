@@ -1,6 +1,6 @@
-// 功能：以與桌面清單相同的透明框樣式顯示便籤、多段文字與可勾選事項。
-// 使用：空白處拖曳移動、右下角縮放、勾選方框切換完成；右鍵可編輯、調色或刪除。
-// 設定：位置、大小、顏色、透明度與內容由 DesktopNotesSettings 自動保存。
+// 功能：以可自訂透明樣式顯示多段文字與勾選事項，支援懸浮圖釘且不壓縮文字區。
+// 使用：空白處拖曳、右下縮放；右鍵可新增／編輯／刪除便籤、調整完整樣式或切換懸浮。
+// 設定：位置、內容、字型、行高、行距、背景與圓角由 DesktopNotesSettings 逐張保存。
 
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
@@ -16,8 +16,8 @@ internal sealed class DesktopLayeredNoteForm : Form
     private readonly DesktopNoteData _data;
     private readonly ContextMenuStrip _menu;
     private readonly System.Windows.Forms.Timer _hoverTimer = new() { Interval = 100 };
-    private readonly Font _font = new("Microsoft JhengHei UI", 11F);
-    private readonly Font _completedFont = new("Microsoft JhengHei UI", 11F, FontStyle.Strikeout);
+    private Font _font = null!;
+    private Font _completedFont = null!;
     private readonly List<(DesktopChecklistItem Item, Rectangle Bounds)> _checkBounds = [];
     private bool _frameVisible;
     private Color _backgroundColor;
@@ -25,10 +25,13 @@ internal sealed class DesktopLayeredNoteForm : Form
     private bool _followTheme;
     private bool _isFloating;
     private readonly ToolStripMenuItem _floatingItem;
+    private OverlayStyleOptions _style = null!;
+    private Point _lastContextScreenPoint;
 
     public event EventHandler? EditRequested;
     public event EventHandler? DeleteRequested;
     public event EventHandler? NoteChanged;
+    public event EventHandler<NoteRequestedEventArgs>? AddNoteRequested;
 
     public DesktopLayeredNoteForm(DesktopNoteData data)
     {
@@ -40,17 +43,18 @@ internal sealed class DesktopLayeredNoteForm : Form
         StartPosition = FormStartPosition.Manual;
         MinimumSize = new Size(240, 140);
         Bounds = DesktopLayeredOverlayForm.ConstrainRectangle(data.Bounds, Screen.FromRectangle(data.Bounds).WorkingArea);
-        _followTheme = data.FollowThemeColor;
-        var savedColor = Color.FromArgb(data.BackgroundColorArgb);
-        _backgroundColor = _followTheme ? OverlayAppearanceSettings.GetWindowsThemeColor() : savedColor;
-        _backgroundOpacity = data.BackgroundOpacity;
+        _style = StyleFromData(data);
+        _followTheme = _style.FollowThemeColor;
+        _backgroundColor = _followTheme ? OverlayAppearanceSettings.GetWindowsThemeColor() : _style.BackgroundColor;
+        _backgroundOpacity = _style.BackgroundOpacity;
+        RecreateFonts();
         _isFloating = data.IsFloating;
         _frameVisible = Environment.GetEnvironmentVariable("DESKTOP_LIST_QA_SHOW_FRAME") == "1";
 
         _menu = new ContextMenuStrip();
+        _menu.Items.Add("新增便籤…", null, (_, _) => AddNoteRequested?.Invoke(this, new NoteRequestedEventArgs(_lastContextScreenPoint)));
         _menu.Items.Add("編輯便籤內容", null, (_, _) => EditRequested?.Invoke(this, EventArgs.Empty));
-        _menu.Items.Add("背景顏色與透明度…", null, (_, _) => EditBackground());
-        _menu.Items.Add("恢復完全透明", null, (_, _) => SetBackground(_backgroundColor, 0, false, save: true));
+        _menu.Items.Add("樣式…", null, (_, _) => EditStyle());
         _floatingItem = new ToolStripMenuItem(_isFloating ? "回到桌面" : "變成懸浮視窗");
         _floatingItem.Click += (_, _) => { if (_isFloating) ReturnToDesktop(); else MakeFloating(); };
         _menu.Items.Add(_floatingItem);
@@ -66,6 +70,7 @@ internal sealed class DesktopLayeredNoteForm : Form
     }
 
     public DesktopNoteData Data => _data;
+    internal IReadOnlyList<string> ContextMenuLabels => _menu.Items.Cast<ToolStripItem>().Select(value => value.Text ?? "").ToArray();
     protected override bool ShowWithoutActivation => true;
 
     protected override CreateParams CreateParams
@@ -117,6 +122,7 @@ internal sealed class DesktopLayeredNoteForm : Form
         }
         if (e.Button == MouseButtons.Right)
         {
+            _lastContextScreenPoint = PointToScreen(e.Location);
             _menu.Show(this, e.Location);
             return;
         }
@@ -146,17 +152,21 @@ internal sealed class DesktopLayeredNoteForm : Form
             graphics.SmoothingMode = SmoothingMode.AntiAlias;
             graphics.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
             using var background = new SolidBrush(Color.FromArgb(Math.Max(1, (int)_backgroundOpacity), _backgroundColor));
-            graphics.FillRectangle(background, ClientRectangle);
+            if (_style.CornerRadius > 0)
+                graphics.FillRoundedRectangle(background, ClientRectangle, Math.Min(_style.CornerRadius, Math.Min(ClientSize.Width, ClientSize.Height) / 2));
+            else graphics.FillRectangle(background, ClientRectangle);
             DrawContent(graphics);
             if (_frameVisible)
             {
                 using var pen = new Pen(Color.FromArgb(225, 96, 165, 250), 2F);
-                graphics.DrawRectangle(pen, 1, 1, ClientSize.Width - 3, ClientSize.Height - 3);
+                var frameBounds = new Rectangle(1, 1, ClientSize.Width - 3, ClientSize.Height - 3);
+                if (_style.CornerRadius > 0) graphics.DrawRoundedRectangle(pen, frameBounds, Math.Min(_style.CornerRadius, Math.Min(frameBounds.Width, frameBounds.Height) / 2));
+                else graphics.DrawRectangle(pen, frameBounds);
                 using var grip = new SolidBrush(Color.FromArgb(235, 96, 165, 250));
                 graphics.FillRectangle(grip, ClientSize.Width - 14, ClientSize.Height - 14, 11, 11);
             }
-            if (_isFloating)
-                DrawFloatingReturnButton(graphics);
+            if (_isFloating && _frameVisible)
+                DrawPinButton(graphics);
         }
         var qaPath = Environment.GetEnvironmentVariable("DESKTOP_LIST_QA_NOTE_PATH");
         if (!string.IsNullOrWhiteSpace(qaPath))
@@ -181,28 +191,24 @@ internal sealed class DesktopLayeredNoteForm : Form
     {
         _checkBounds.Clear();
         var width = Math.Max(1, ClientSize.Width - PaddingSize * 2);
-        var y = _isFloating ? 48 : PaddingSize;
+        var y = PaddingSize;
         var availableHeight = Math.Max(20, ClientSize.Height - y - PaddingSize);
-        var checklistHeight = Math.Min(_data.Items.Count * 31, availableHeight);
+        var itemStep = Math.Max(_style.LineHeight, (int)Math.Ceiling(_font.GetHeight(graphics)) + 6) + _style.LineSpacing;
+        var checklistHeight = Math.Min(_data.Items.Count * itemStep, availableHeight);
         if (!string.IsNullOrWhiteSpace(_data.Text))
         {
             using var textBrush = new SolidBrush(Color.White);
             using var shadowBrush = new SolidBrush(Color.FromArgb(210, 0, 0, 0));
-            var format = new StringFormat { Trimming = StringTrimming.EllipsisWord };
-            var measured = graphics.MeasureString(_data.Text, _font, width, format);
             var maximumBodyHeight = _data.Items.Count == 0
                 ? availableHeight
                 : Math.Max(20, availableHeight - checklistHeight - 10);
-            var bodyHeight = Math.Min((int)Math.Ceiling(measured.Height) + 2, maximumBodyHeight);
-            graphics.DrawString(_data.Text, _font, shadowBrush, new RectangleF(PaddingSize + 1, y + 1, width, bodyHeight), format);
-            graphics.DrawString(_data.Text, _font, textBrush, new RectangleF(PaddingSize, y, width, bodyHeight), format);
-            y += bodyHeight + 10;
+            y = DrawWrappedText(graphics, _data.Text, PaddingSize, y, width, maximumBodyHeight, shadowBrush, textBrush) + 10;
         }
         foreach (var item in _data.Items.OrderBy(value => value.Completed))
         {
-            if (y + 30 > ClientSize.Height - 12)
+            if (y + itemStep > ClientSize.Height - 12)
                 break;
-            var row = new Rectangle(PaddingSize, y, width, 30);
+            var row = new Rectangle(PaddingSize, y, width, itemStep);
             var box = new Rectangle(row.X + 2, row.Y + 6, 17, 17);
             using var boxPen = new Pen(Color.White, 1.8F);
             graphics.DrawRectangle(boxPen, box);
@@ -217,37 +223,79 @@ internal sealed class DesktopLayeredNoteForm : Form
             graphics.DrawString(item.Text, font, shadowBrush, row.X + 27, row.Y + 4);
             graphics.DrawString(item.Text, font, textBrush, row.X + 26, row.Y + 3);
             _checkBounds.Add((item, row));
-            y += 31;
+            y += itemStep;
         }
     }
 
-    private void EditBackground()
+    private int DrawWrappedText(Graphics graphics, string text, int x, int y, int width, int maximumHeight, Brush shadow, Brush foreground)
     {
-        var original = (_backgroundColor, _backgroundOpacity, _followTheme);
-        using var dialog = new OverlayAppearanceDialog(_backgroundColor, _backgroundOpacity, _followTheme);
-        dialog.PreviewChanged += (_, _) => SetBackground(dialog.SelectedColor, dialog.SelectedOpacity, dialog.FollowThemeColor, false);
-        if (dialog.ShowDialog(this) == DialogResult.OK)
-            SetBackground(dialog.SelectedColor, dialog.SelectedOpacity, dialog.FollowThemeColor, true);
-        else
-            SetBackground(original._backgroundColor, original._backgroundOpacity, original._followTheme, false);
+        var step = Math.Max(_style.LineHeight, (int)Math.Ceiling(_font.GetHeight(graphics))) + _style.LineSpacing;
+        var currentY = y;
+        foreach (var paragraph in text.Replace("\r", "").Split('\n'))
+        {
+            foreach (var line in WrapLine(graphics, paragraph, width))
+            {
+                if (currentY + step > y + maximumHeight) return currentY;
+                graphics.DrawString(line, _font, shadow, x + 1, currentY + 1);
+                graphics.DrawString(line, _font, foreground, x, currentY);
+                currentY += step;
+            }
+            if (paragraph.Length == 0) currentY += step;
+        }
+        return currentY;
     }
 
-    private void SetBackground(Color color, byte opacity, bool followTheme, bool save)
+    private IEnumerable<string> WrapLine(Graphics graphics, string text, int width)
     {
-        _followTheme = followTheme;
-        _backgroundColor = followTheme ? OverlayAppearanceSettings.GetWindowsThemeColor() : Color.FromArgb(color.R, color.G, color.B);
-        _backgroundOpacity = opacity;
+        if (text.Length == 0) return [""];
+        var result = new List<string>();
+        var start = 0;
+        while (start < text.Length)
+        {
+            var count = 1;
+            while (start + count <= text.Length && graphics.MeasureString(text.Substring(start, count), _font).Width <= width) count++;
+            count = Math.Max(1, count - 1);
+            result.Add(text.Substring(start, count));
+            start += count;
+        }
+        return result;
+    }
+
+    private void EditStyle()
+    {
+        var original = _style.Clone();
+        using var dialog = new OverlayStyleDialog(_style.Clone(), "便籤");
+        dialog.PreviewChanged += (_, _) => ApplyStyle(dialog.SelectedStyle, false);
+        if (dialog.ShowDialog(this) == DialogResult.OK)
+            ApplyStyle(dialog.SelectedStyle, true);
+        else
+            ApplyStyle(original, false);
+    }
+
+    private void ApplyStyle(OverlayStyleOptions style, bool save)
+    {
+        _style = style.Clone();
+        _followTheme = _style.FollowThemeColor;
+        _backgroundColor = _followTheme ? OverlayAppearanceSettings.GetWindowsThemeColor() : _style.BackgroundColor;
+        _backgroundOpacity = _style.BackgroundOpacity;
+        RecreateFonts();
         if (save)
         {
             _data.BackgroundColorArgb = _backgroundColor.ToArgb();
-            _data.BackgroundOpacity = opacity;
-            _data.FollowThemeColor = followTheme;
+            _data.BackgroundOpacity = _style.BackgroundOpacity;
+            _data.FollowThemeColor = _style.FollowThemeColor;
+            _data.FontFamily = _style.FontFamily;
+            _data.FontSize = _style.FontSize;
+            _data.FontBold = _style.Bold;
+            _data.LineHeight = _style.LineHeight;
+            _data.LineSpacing = _style.LineSpacing;
+            _data.CornerRadius = _style.CornerRadius;
             NoteChanged?.Invoke(this, EventArgs.Empty);
         }
         RenderLayer();
     }
 
-    private Rectangle FloatingReturnButtonBounds => new(Math.Max(12, ClientSize.Width - 116), 8, 98, 28);
+    private Rectangle FloatingReturnButtonBounds => new(Math.Max(4, ClientSize.Width - 34), 4, 28, 28);
 
     private void MakeFloating()
     {
@@ -271,17 +319,15 @@ internal sealed class DesktopLayeredNoteForm : Form
         NoteChanged?.Invoke(this, EventArgs.Empty);
     }
 
-    private void DrawFloatingReturnButton(Graphics graphics)
+    private void DrawPinButton(Graphics graphics)
     {
         using var background = new SolidBrush(Color.FromArgb(225, 30, 41, 59));
         graphics.FillRoundedRectangle(background, FloatingReturnButtonBounds, 6);
-        using var brush = new SolidBrush(Color.White);
-        using var font = new Font("Microsoft JhengHei UI", 9F, FontStyle.Bold);
-        const string text = "回到桌面";
-        var size = graphics.MeasureString(text, font);
-        graphics.DrawString(text, font, brush,
-            FloatingReturnButtonBounds.X + (FloatingReturnButtonBounds.Width - size.Width) / 2,
-            FloatingReturnButtonBounds.Y + (FloatingReturnButtonBounds.Height - size.Height) / 2);
+        using var pen = new Pen(Color.White, 2F);
+        var centerX = FloatingReturnButtonBounds.Left + FloatingReturnButtonBounds.Width / 2;
+        graphics.DrawEllipse(pen, centerX - 5, FloatingReturnButtonBounds.Top + 5, 10, 7);
+        graphics.DrawLine(pen, centerX - 6, FloatingReturnButtonBounds.Top + 14, centerX + 6, FloatingReturnButtonBounds.Top + 14);
+        graphics.DrawLine(pen, centerX, FloatingReturnButtonBounds.Top + 12, centerX, FloatingReturnButtonBounds.Bottom - 5);
     }
 
     private void RevealFrame() { if (!_frameVisible) { _frameVisible = true; RenderLayer(); } }
@@ -298,6 +344,7 @@ internal sealed class DesktopLayeredNoteForm : Form
     {
         if (!_followTheme || IsDisposed) return;
         _backgroundColor = OverlayAppearanceSettings.GetWindowsThemeColor();
+        _style.BackgroundColor = _backgroundColor;
         _data.BackgroundColorArgb = _backgroundColor.ToArgb();
         if (IsHandleCreated) BeginInvoke(RenderLayer);
     }
@@ -339,6 +386,28 @@ internal sealed class DesktopLayeredNoteForm : Form
             UpdateLayeredWindow(Handle, screenDc, ref destination, ref size, memoryDc, ref source, 0, ref blend, 2);
         }
         finally { SelectObject(memoryDc, previous); DeleteObject(handle); DeleteDC(memoryDc); ReleaseDC(IntPtr.Zero, screenDc); }
+    }
+
+    private static OverlayStyleOptions StyleFromData(DesktopNoteData data) => new()
+    {
+        BackgroundColor = Color.FromArgb(data.BackgroundColorArgb),
+        BackgroundOpacity = data.BackgroundOpacity,
+        FollowThemeColor = data.FollowThemeColor,
+        FontFamily = data.FontFamily,
+        FontSize = data.FontSize,
+        Bold = data.FontBold,
+        LineHeight = data.LineHeight,
+        LineSpacing = data.LineSpacing,
+        CornerRadius = data.CornerRadius
+    };
+
+    private void RecreateFonts()
+    {
+        _font?.Dispose();
+        _completedFont?.Dispose();
+        _font = OverlayStyleDialog.CreateFont(_style);
+        try { _completedFont = new Font(_font, _font.Style | FontStyle.Strikeout); }
+        catch (ArgumentException) { _completedFont = new Font("Microsoft JhengHei UI", _style.FontSize, FontStyle.Strikeout); }
     }
 
     protected override void Dispose(bool disposing)

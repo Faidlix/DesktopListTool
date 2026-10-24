@@ -6,7 +6,7 @@ using Microsoft.Win32;
 
 namespace DesktopListTool;
 
-internal sealed class OverlayAppearanceDialog : Form
+internal sealed class LegacyOverlayAppearanceDialog : Form
 {
     private readonly Button _colorButton = new();
     private readonly TrackBar _opacityTrack = new();
@@ -17,7 +17,7 @@ internal sealed class OverlayAppearanceDialog : Form
 
     public event EventHandler? PreviewChanged;
 
-    public OverlayAppearanceDialog(Color color, byte opacity, bool followTheme)
+    public LegacyOverlayAppearanceDialog(Color color, byte opacity, bool followTheme)
     {
         _selectedColor = color;
         Text = "清單背景設定";
@@ -113,7 +113,7 @@ internal sealed class OverlayAppearanceDialog : Form
         (int)Math.Round(foreground.B * amount + background.B * (1 - amount)));
 }
 
-internal static class OverlayAppearanceSettings
+internal static class LegacyOverlayAppearanceSettings
 {
     private const string SettingsKey = @"Software\DesktopListTool";
 
