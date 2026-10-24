@@ -1,5 +1,5 @@
 // 功能：以可自訂透明樣式顯示可捲動 Markdown 與勾選事項，支援懸浮圖釘且不遮住內容。
-// 使用：空白處拖曳、連點兩下編輯、滑鼠滾輪捲動、拖曳捲軸；右下角縮放，右鍵可調整樣式或切換懸浮。
+// 使用：空白處拖曳、本文或事項連點兩下原地編輯、滑鼠滾輪捲動；四角縮放，右鍵可調整樣式或切換懸浮。
 // 設定：位置、內容、字型、行高、行距、背景與圓角由 DesktopNotesSettings 逐張保存。
 
 using System.Drawing.Drawing2D;
@@ -16,9 +16,14 @@ internal sealed class DesktopLayeredNoteForm : Form
     private readonly DesktopNoteData _data;
     private readonly ContextMenuStrip _menu;
     private readonly System.Windows.Forms.Timer _hoverTimer = new() { Interval = 100 };
+    private readonly System.Windows.Forms.Timer _checkClickTimer = new() { Interval = SystemInformation.DoubleClickTime };
     private Font _font = null!;
     private Font _completedFont = null!;
     private readonly List<(DesktopChecklistItem Item, Rectangle Bounds)> _checkBounds = [];
+    private readonly Dictionary<Guid, Rectangle> _checkTextBounds = [];
+    private Rectangle _addChecklistBounds;
+    private DesktopChecklistItem? _pendingCheckItem;
+    private InlineTextEditor? _inlineEditor;
     private bool _frameVisible;
     private Color _backgroundColor;
     private byte _backgroundOpacity;
@@ -80,6 +85,7 @@ internal sealed class DesktopLayeredNoteForm : Form
         MouseDown += HandleMouseDown;
         MouseDoubleClick += HandleMouseDoubleClick;
         _hoverTimer.Tick += (_, _) => UpdateFrameVisibility();
+        _checkClickTimer.Tick += (_, _) => CommitPendingCheckToggle();
         _hoverTimer.Start();
         SystemEvents.UserPreferenceChanged += HandleUserPreferenceChanged;
     }
@@ -161,13 +167,16 @@ internal sealed class DesktopLayeredNoteForm : Form
             _scrollDragStartOffset = _scrollOffset;
             return;
         }
+        if (_addChecklistBounds.Contains(e.Location))
+        {
+            var item = new DesktopChecklistItem(); _data.Items.Insert(0, item); RenderLayer(); BeginInlineChecklistEdit(item, true);
+            return;
+        }
         var hit = _checkBounds.FirstOrDefault(value => value.Bounds.Contains(e.Location));
         if (hit.Item is not null)
         {
-            hit.Item.Completed = !hit.Item.Completed;
-            _data.Items = _data.Items.OrderBy(value => value.Completed).ToList();
-            RenderLayer();
-            NoteChanged?.Invoke(this, EventArgs.Empty);
+            _pendingCheckItem = hit.Item;
+            _checkClickTimer.Stop(); _checkClickTimer.Start();
             return;
         }
         _movePending = true;
@@ -199,10 +208,14 @@ internal sealed class DesktopLayeredNoteForm : Form
 
     private void HandleMouseDoubleClick(object? sender, MouseEventArgs e)
     {
-        if (e.Button != MouseButtons.Left || FloatingReturnButtonBounds.Contains(e.Location) || ScrollbarThumbBounds.Contains(e.Location) ||
-            _checkBounds.Any(value => value.Bounds.Contains(e.Location)) || (e.X >= ClientSize.Width - 18 && e.Y >= ClientSize.Height - 18)) return;
+        if (e.Button != MouseButtons.Left || FloatingReturnButtonBounds.Contains(e.Location) || ScrollbarThumbBounds.Contains(e.Location) || IsResizeCorner(e.Location)) return;
         _movePending = false;
-        EditRequested?.Invoke(this, EventArgs.Empty);
+        var hit = _checkBounds.FirstOrDefault(value => value.Bounds.Contains(e.Location));
+        if (hit.Item is not null)
+        {
+            _checkClickTimer.Stop(); _pendingCheckItem = null; BeginInlineChecklistEdit(hit.Item, false); return;
+        }
+        if (!_addChecklistBounds.Contains(e.Location)) BeginInlineBodyEdit();
     }
 
     private void RenderLayer()
@@ -227,7 +240,8 @@ internal sealed class DesktopLayeredNoteForm : Form
                 if (_style.CornerRadius > 0) graphics.DrawRoundedRectangle(pen, frameBounds, Math.Min(_style.CornerRadius, Math.Min(frameBounds.Width, frameBounds.Height) / 2));
                 else graphics.DrawRectangle(pen, frameBounds);
                 using var grip = new SolidBrush(Color.FromArgb(235, 96, 165, 250));
-                graphics.FillRectangle(grip, ClientSize.Width - 14, ClientSize.Height - 14, 11, 11);
+                graphics.FillRectangle(grip, 3, 3, 10, 10); graphics.FillRectangle(grip, ClientSize.Width - 13, 3, 10, 10);
+                graphics.FillRectangle(grip, 3, ClientSize.Height - 13, 10, 10); graphics.FillRectangle(grip, ClientSize.Width - 13, ClientSize.Height - 13, 10, 10);
                 DrawScrollbar(graphics);
             }
             if (_isFloating && _frameVisible)
@@ -255,28 +269,36 @@ internal sealed class DesktopLayeredNoteForm : Form
     private void DrawContent(Graphics graphics)
     {
         _checkBounds.Clear();
+        _checkTextBounds.Clear(); _addChecklistBounds = Rectangle.Empty;
         var safe = SafeContentBounds;
         var originalState = graphics.Save();
         graphics.SetClip(safe);
         var width = Math.Max(1, safe.Width);
         var y = safe.Top - _scrollOffset;
         var itemStep = Math.Max(_style.LineHeight, (int)Math.Ceiling(_font.GetHeight(graphics)) + 6) + _style.LineSpacing;
-        var (bodyRows, bodyHeight) = MeasureMarkdownLayout(graphics, _data.Text, width);
-        var totalRows = bodyRows + _data.Items.Count;
-        var naturalHeight = bodyHeight + (_data.Text.Length > 0 ? 10 : 0) + _data.Items.Count * itemStep;
-        var distributionExtra = _style.Distribution == OverlayContentDistribution.Fill && totalRows > 1 && naturalHeight < safe.Height
-            ? (safe.Height - naturalHeight) / totalRows : 0;
-        _lastDistributionExtra = distributionExtra;
+        _lastDistributionExtra = 0;
         if (!string.IsNullOrWhiteSpace(_data.Text))
         {
             using var textBrush = new SolidBrush(_style.TextColor);
             using var shadowBrush = new SolidBrush(Color.FromArgb(210, 0, 0, 0));
-            y = DrawMarkdownText(graphics, _data.Text, safe.Left, y, width, distributionExtra, shadowBrush, textBrush) + 10;
+            y = DrawMarkdownText(graphics, _data.Text, safe.Left, y, width, shadowBrush, textBrush) + 10;
         }
-        foreach (var item in _data.Items.OrderBy(value => value.Completed))
+        var ordered = _data.Items.OrderBy(value => value.Completed).ToList();
+        if (ordered.Count == 0)
         {
+            _addChecklistBounds = new Rectangle(safe.Left, y, Math.Max(28, itemStep), itemStep);
+            DrawAddButton(graphics, _addChecklistBounds);
+            y += itemStep;
+        }
+        for (var itemIndex = 0; itemIndex < ordered.Count; itemIndex++)
+        {
+            var item = ordered[itemIndex];
             var row = new Rectangle(safe.Left, y, width, itemStep);
-            var box = new Rectangle(row.X + 2, row.Y + 6, 17, 17);
+            var font = item.Completed ? _completedFont : _font;
+            var boxSize = Math.Max(18, (int)Math.Ceiling(font.GetHeight(graphics)) + 3);
+            var leading = row.X;
+            if (itemIndex == 0) { _addChecklistBounds = new Rectangle(leading, row.Y, boxSize + 6, row.Height); DrawAddButton(graphics, _addChecklistBounds); leading = _addChecklistBounds.Right + 2; }
+            var box = new Rectangle(leading, row.Y + Math.Max(0, (row.Height - boxSize) / 2), boxSize, boxSize);
             using var boxPen = new Pen(_style.TextColor, 1.8F);
             graphics.DrawRectangle(boxPen, box);
             if (item.Completed)
@@ -286,20 +308,18 @@ internal sealed class DesktopLayeredNoteForm : Form
             }
             using var textBrush = new SolidBrush(_style.TextColor);
             using var shadowBrush = new SolidBrush(Color.FromArgb(210, 0, 0, 0));
-            var font = item.Completed ? _completedFont : _font;
-            var itemBounds = new RectangleF(row.X + 26, row.Y + 3, Math.Max(1, row.Width - 28), row.Height);
-            using var format = CreateTextFormat();
-            graphics.DrawString(item.Text, font, shadowBrush, new RectangleF(itemBounds.X + 1, itemBounds.Y + 1, itemBounds.Width, itemBounds.Height), format);
-            graphics.DrawString(item.Text, font, textBrush, itemBounds, format);
+            var itemBounds = new RectangleF(box.Right + 8, row.Y + Math.Max(0, (row.Height - font.Height) / 2F), Math.Max(1, row.Right - box.Right - 10), row.Height);
+            DrawSimpleText(graphics, item.Text, font, itemBounds, shadowBrush, textBrush);
             _checkBounds.Add((item, row));
-            y += itemStep + distributionExtra;
+            _checkTextBounds[item.Id] = Rectangle.Ceiling(itemBounds);
+            y += itemStep;
         }
         _contentHeight = Math.Max(safe.Height, y + _scrollOffset - safe.Top);
         graphics.Restore(originalState);
         ClampScroll();
     }
 
-    private int DrawMarkdownText(Graphics graphics, string text, int x, int y, int width, int distributionExtra, Brush shadow, Brush foreground)
+    private int DrawMarkdownText(Graphics graphics, string text, int x, int y, int width, Brush shadow, Brush foreground)
     {
         var currentY = y;
         var sourceLines = text.Replace("\r", "").Split('\n');
@@ -320,9 +340,9 @@ internal sealed class DesktopLayeredNoteForm : Form
             foreach (var line in lines)
             {
                 DrawRunLine(graphics, line, parsed.HeadingLevel, x, currentY, width, shadow, foreground);
-                currentY += naturalSteps[lineIndex] + distributionExtra;
+                currentY += naturalSteps[lineIndex];
             }
-            if (lines.Count == 0) currentY += naturalSteps[lineIndex] + distributionExtra;
+            if (lines.Count == 0) currentY += naturalSteps[lineIndex];
         }
         return currentY;
     }
@@ -377,14 +397,36 @@ internal sealed class DesktopLayeredNoteForm : Form
         using var baseFont = CreateMarkdownFont(heading, FontStyle.Regular);
         foreach (var run in runs) { var font = CreateRunFont(baseFont, run); sizes.Add((run, font, graphics.MeasureString(run.Text, font, PointF.Empty, StringFormat.GenericTypographic).Width)); }
         var total = sizes.Sum(value => value.Width);
-        var cursor = _style.TextAlignment switch { OverlayTextAlignment.Center => x + Math.Max(0, (width - total) / 2), OverlayTextAlignment.Right => x + Math.Max(0, width - total), _ => x };
+        var fill = _style.Distribution == OverlayContentDistribution.Fill && runs.Sum(value => value.Text.Length) > 1;
+        var gaps = Math.Max(1, runs.Sum(value => value.Text.Length) - 1); var extra = fill ? Math.Max(0, width - total) / gaps : 0F;
+        var cursor = fill ? x : _style.TextAlignment switch { OverlayTextAlignment.Center => x + Math.Max(0, (width - total) / 2), OverlayTextAlignment.Right => x + Math.Max(0, width - total), _ => x };
         foreach (var value in sizes)
         {
-            if (value.Run.IsCode) { using var codeBackground = new SolidBrush(Color.FromArgb(75, 255, 255, 255)); graphics.FillRectangle(codeBackground, new RectangleF(cursor - 2, y, value.Width + 4, value.Font.Height + 2)); }
-            graphics.DrawString(value.Run.Text, value.Font, shadow, cursor + 1, y + 1, StringFormat.GenericTypographic);
-            graphics.DrawString(value.Run.Text, value.Font, foreground, cursor, y, StringFormat.GenericTypographic);
-            cursor += value.Width; value.Font.Dispose();
+            foreach (var character in value.Run.Text.Select(ch => ch.ToString()))
+            {
+                var characterWidth = graphics.MeasureString(character, value.Font, PointF.Empty, StringFormat.GenericTypographic).Width;
+                if (value.Run.IsCode) { using var codeBackground = new SolidBrush(Color.FromArgb(75, 255, 255, 255)); graphics.FillRectangle(codeBackground, new RectangleF(cursor - 2, y, characterWidth + 4, value.Font.Height + 2)); }
+                graphics.DrawString(character, value.Font, shadow, cursor + 1, y + 1, StringFormat.GenericTypographic);
+                graphics.DrawString(character, value.Font, foreground, cursor, y, StringFormat.GenericTypographic);
+                cursor += characterWidth + extra;
+            }
+            value.Font.Dispose();
         }
+    }
+
+    private void DrawSimpleText(Graphics graphics, string text, Font font, RectangleF bounds, Brush shadow, Brush foreground)
+    {
+        var widths = text.Select(value => graphics.MeasureString(value.ToString(), font, PointF.Empty, StringFormat.GenericTypographic).Width).ToArray();
+        var total = widths.Sum(); var fill = _style.Distribution == OverlayContentDistribution.Fill && widths.Length > 1;
+        var extra = fill ? Math.Max(0, bounds.Width - total) / (widths.Length - 1) : 0F;
+        var cursor = fill ? bounds.Left : _style.TextAlignment switch { OverlayTextAlignment.Center => bounds.Left + Math.Max(0, (bounds.Width - total) / 2), OverlayTextAlignment.Right => bounds.Right - total, _ => bounds.Left };
+        for (var i = 0; i < text.Length; i++) { var value = text[i].ToString(); graphics.DrawString(value, font, shadow, cursor + 1, bounds.Top + 1, StringFormat.GenericTypographic); graphics.DrawString(value, font, foreground, cursor, bounds.Top, StringFormat.GenericTypographic); cursor += widths[i] + extra; }
+    }
+
+    private void DrawAddButton(Graphics graphics, Rectangle bounds)
+    {
+        using var pen = new Pen(_style.TextColor, 2F); var cx = bounds.Left + bounds.Width / 2; var cy = bounds.Top + bounds.Height / 2;
+        graphics.DrawLine(pen, cx - 6, cy, cx + 6, cy); graphics.DrawLine(pen, cx, cy - 6, cx, cy + 6);
     }
 
     private Font CreateMarkdownFont(int heading, FontStyle extra)
@@ -429,6 +471,38 @@ internal sealed class DesktopLayeredNoteForm : Form
     }
     private void ClampScroll() => _scrollOffset = Math.Clamp(_scrollOffset, 0, Math.Max(0, _contentHeight - SafeContentBounds.Height));
 
+    private void CommitPendingCheckToggle()
+    {
+        _checkClickTimer.Stop(); var item = _pendingCheckItem; _pendingCheckItem = null;
+        if (item is null || !_data.Items.Contains(item)) return;
+        item.Completed = !item.Completed; _data.Items = _data.Items.OrderBy(value => value.Completed).ToList(); RenderLayer(); NoteChanged?.Invoke(this, EventArgs.Empty);
+    }
+
+    private void BeginInlineBodyEdit()
+    {
+        CloseInlineEditor();
+        var safe = SafeContentBounds; var screen = RectangleToScreen(safe);
+        _inlineEditor = new InlineTextEditor(screen, _data.Text, _font, _style.TextColor, EditorBackgroundColor(), true);
+        _inlineEditor.Committed += value => { _data.Text = value.TrimEnd(); _scrollOffset = 0; _inlineEditor = null; RenderLayer(); NoteChanged?.Invoke(this, EventArgs.Empty); };
+        _inlineEditor.Canceled += () => _inlineEditor = null;
+        _inlineEditor.Show(this);
+    }
+
+    private void BeginInlineChecklistEdit(DesktopChecklistItem item, bool removeOnCancel)
+    {
+        CloseInlineEditor(); RenderLayer();
+        if (!_checkTextBounds.TryGetValue(item.Id, out var local)) local = new Rectangle(SafeContentBounds.Left + 30, SafeContentBounds.Top, Math.Max(80, SafeContentBounds.Width - 30), Math.Max(28, _style.LineHeight));
+        var screen = RectangleToScreen(local);
+        _inlineEditor = new InlineTextEditor(screen, item.Text, _font, _style.TextColor, EditorBackgroundColor(), false);
+        _inlineEditor.Committed += value => { item.Text = value.Trim(); if (item.Text.Length == 0) _data.Items.Remove(item); _data.Items = _data.Items.OrderBy(value => value.Completed).ToList(); _inlineEditor = null; RenderLayer(); NoteChanged?.Invoke(this, EventArgs.Empty); };
+        _inlineEditor.Canceled += () => { if (removeOnCancel) _data.Items.Remove(item); _inlineEditor = null; RenderLayer(); if (removeOnCancel) NoteChanged?.Invoke(this, EventArgs.Empty); };
+        _inlineEditor.Show(this);
+    }
+
+    private Color EditorBackgroundColor() => Color.FromArgb(255, _backgroundColor.R, _backgroundColor.G, _backgroundColor.B);
+    private void CloseInlineEditor() { if (_inlineEditor is { IsDisposed: false } editor) editor.Close(); _inlineEditor = null; }
+    private bool IsResizeCorner(Point point) => (point.X < 18 || point.X >= ClientSize.Width - 18) && (point.Y < 18 || point.Y >= ClientSize.Height - 18);
+
     private void EditStyle()
     {
         var original = _style.Clone();
@@ -454,8 +528,10 @@ internal sealed class DesktopLayeredNoteForm : Form
             _data.FollowThemeColor = _style.FollowThemeColor;
             _data.GradientEnabled = _style.GradientEnabled;
             _data.GradientColorArgb = _style.GradientColor.ToArgb();
+            _data.GradientOpacity = _style.GradientOpacity;
             _data.GradientTransition = _style.GradientTransition;
             _data.GradientDirection = _style.GradientDirection;
+            _data.GradientMode = _style.GradientMode;
             _data.TextColorArgb = _style.TextColor.ToArgb();
             _data.FontFamily = _style.FontFamily;
             _data.FontSize = _style.FontSize;
@@ -526,11 +602,17 @@ internal sealed class DesktopLayeredNoteForm : Form
 
     protected override void WndProc(ref Message message)
     {
-        const int WmNcHitTest = 0x0084, WmMoving = 0x0216, WmExitSizeMove = 0x0232;
+        const int WmNcHitTest = 0x0084, WmMoving = 0x0216, WmSizing = 0x0214, WmExitSizeMove = 0x0232;
         if (message.Msg == WmMoving && message.LParam != IntPtr.Zero)
         {
             var bounds = Marshal.PtrToStructure<NativeRect>(message.LParam).ToRectangle();
             var constrained = DesktopLayeredOverlayForm.ConstrainRectangle(bounds, Screen.FromRectangle(bounds).WorkingArea);
+            Marshal.StructureToPtr(NativeRect.FromRectangle(constrained), message.LParam, false);
+        }
+        if (message.Msg == WmSizing && message.LParam != IntPtr.Zero)
+        {
+            var bounds = Marshal.PtrToStructure<NativeRect>(message.LParam).ToRectangle();
+            var constrained = DesktopLayeredOverlayForm.ConstrainSizingRectangle(bounds, Screen.FromRectangle(bounds).WorkingArea, message.WParam.ToInt32(), MinimumSize);
             Marshal.StructureToPtr(NativeRect.FromRectangle(constrained), message.LParam, false);
         }
         base.WndProc(ref message);
@@ -544,7 +626,10 @@ internal sealed class DesktopLayeredNoteForm : Form
         {
             var screen = new Point((short)(message.LParam.ToInt64() & 0xFFFF), (short)((message.LParam.ToInt64() >> 16) & 0xFFFF));
             var client = PointToClient(screen);
-            if (client.X >= ClientSize.Width - 18 && client.Y >= ClientSize.Height - 18) message.Result = (IntPtr)17;
+            if (client.X < 18 && client.Y < 18) message.Result = (IntPtr)13;
+            else if (client.X >= ClientSize.Width - 18 && client.Y < 18) message.Result = (IntPtr)14;
+            else if (client.X < 18 && client.Y >= ClientSize.Height - 18) message.Result = (IntPtr)16;
+            else if (client.X >= ClientSize.Width - 18 && client.Y >= ClientSize.Height - 18) message.Result = (IntPtr)17;
             else if (client.X < 10 || client.Y < 10 || client.X > ClientSize.Width - 10 || client.Y > ClientSize.Height - 10) message.Result = (IntPtr)2;
         }
     }
@@ -570,8 +655,10 @@ internal sealed class DesktopLayeredNoteForm : Form
         FollowThemeColor = data.FollowThemeColor,
         GradientEnabled = data.GradientEnabled,
         GradientColor = Color.FromArgb(data.GradientColorArgb),
+        GradientOpacity = data.GradientOpacity,
         GradientTransition = data.GradientTransition,
         GradientDirection = data.GradientDirection,
+        GradientMode = data.GradientMode,
         TextColor = Color.FromArgb(data.TextColorArgb),
         FontFamily = data.FontFamily,
         FontSize = data.FontSize,
@@ -596,7 +683,7 @@ internal sealed class DesktopLayeredNoteForm : Form
     {
         if (disposing)
         {
-            _hoverTimer.Dispose(); _menu.Dispose(); _font.Dispose(); _completedFont.Dispose();
+            CloseInlineEditor(); _checkClickTimer.Dispose(); _hoverTimer.Dispose(); _menu.Dispose(); _font.Dispose(); _completedFont.Dispose();
             SystemEvents.UserPreferenceChanged -= HandleUserPreferenceChanged;
         }
         base.Dispose(disposing);

@@ -12,6 +12,12 @@ internal static class Program
     {
         ApplicationConfiguration.Initialize();
 
+        if (args.Length >= 4 && args[0].Equals("--shell-drop", StringComparison.OrdinalIgnoreCase))
+        {
+            Environment.ExitCode = NativeShellDropTarget.TryDrop(args[1], args.Skip(3).ToArray(), args[2].Equals("copy", StringComparison.OrdinalIgnoreCase)) ? 0 : 1;
+            return;
+        }
+
         if (args.Length >= 4 && args[0].Equals("--shell-menu", StringComparison.OrdinalIgnoreCase))
         {
             if (int.TryParse(args[2], out var x) && int.TryParse(args[3], out var y))
@@ -1162,8 +1168,10 @@ internal static class SmokeTests
                 FollowThemeColor = false,
                 GradientEnabled = true,
                 GradientColor = Color.DarkOrange,
+                GradientOpacity = 140,
                 GradientTransition = 65,
                 GradientDirection = OverlayGradientDirection.DiagonalDown,
+                GradientMode = OverlayGradientMode.Sandwich,
                 TextColor = Color.LightYellow,
                 FontSize = 12,
                 Bold = true,
@@ -1179,10 +1187,11 @@ internal static class SmokeTests
                 Assert(themeOption.Text.Contains("Windows 系統顏色"), "system color option is visible");
                 Assert(appearance.SelectedStyle.Bold && appearance.SelectedStyle.CornerRadius == 18 &&
                     appearance.SelectedStyle.TextAlignment == OverlayTextAlignment.Center && appearance.SelectedStyle.Distribution == OverlayContentDistribution.Fill &&
-                    appearance.SelectedStyle.GradientEnabled && appearance.SelectedStyle.GradientDirection == OverlayGradientDirection.DiagonalDown && appearance.SelectedStyle.TextColor == Color.LightYellow,
+                    appearance.SelectedStyle.GradientEnabled && appearance.SelectedStyle.GradientDirection == OverlayGradientDirection.DiagonalDown && appearance.SelectedStyle.GradientMode == OverlayGradientMode.Sandwich && appearance.SelectedStyle.GradientOpacity == 140 && appearance.SelectedStyle.TextColor == Color.LightYellow,
                     "extended style values round trip");
                 Assert(appearance.AcceptButton is null, "style Enter does not confirm");
-                Assert(controls.OfType<SliderNumberControl>().Count() == 6, "all numeric style values use sliders");
+                Assert(controls.OfType<SliderNumberControl>().Count() == 5, "all persistent numeric style values use sliders and opacity is integrated with colors");
+                Assert(!controls.OfType<Panel>().Any(value => value.Height == 190), "redundant style preview is removed");
                 Assert(controls.OfType<ButtonChoice<OverlayTextAlignment>>().Any() && controls.OfType<ButtonChoice<OverlayContentDistribution>>().Any() && controls.OfType<ButtonChoice<FontStyle>>().Any(), "alignment distribution and weight use buttons");
                 var fontChoices = controls.OfType<ComboBox>().Single(value => value.DrawMode == DrawMode.OwnerDrawFixed).Items.Cast<FontChoice>().ToArray();
                 Assert(!fontChoices.SkipWhile(value => value.SupportsChinese).Any(value => value.SupportsChinese), "unsupported Chinese fonts are sorted last");
@@ -1219,6 +1228,29 @@ internal static class SmokeTests
                 DesktopLayeredOverlayForm.TransferPaths([file], moveTarget, copy: false);
                 Assert(File.Exists(Path.Combine(moveTarget, "drag.txt")) && !File.Exists(file), "drag moves file");
                 Assert(DesktopLayeredOverlayForm.IsFolderDropTarget(new Rectangle(10, 18, 300, 26), new Point(295, 30)), "folder row center accepts drop");
+                Assert(NativeShellDropTarget.IsArchivePath(Path.Combine(moveTarget, "test.zip")) == false, "missing archive is not a drop target");
+                var archive = Path.Combine(moveTarget, "test.zip"); using (System.IO.Compression.ZipFile.Open(archive, System.IO.Compression.ZipArchiveMode.Create)) { }
+                Assert(NativeShellDropTarget.IsArchivePath(archive), "archive extension is a drop target");
+                var zipSource = Path.Combine(moveTarget, "zip-source.txt"); File.WriteAllText(zipSource, "zip");
+                Assert(NativeShellDropTarget.TryDrop(archive, [zipSource], copy: true), "isolated archive handler adds files");
+                using (var zip = System.IO.Compression.ZipFile.OpenRead(archive)) Assert(zip.GetEntry("zip-source.txt") is not null, "zip entry is written before helper exits");
+                object? shell = null, shortcut = null;
+                try
+                {
+                    var shellType = Type.GetTypeFromProgID("WScript.Shell")!; shell = Activator.CreateInstance(shellType)!;
+                    var shortcutPath = Path.Combine(transferRoot, "folder.lnk");
+                    shortcut = shell.GetType().InvokeMember("CreateShortcut", System.Reflection.BindingFlags.InvokeMethod, null, shell, [shortcutPath]);
+                    shortcut!.GetType().InvokeMember("TargetPath", System.Reflection.BindingFlags.SetProperty, null, shortcut, [moveTarget]);
+                    shortcut.GetType().InvokeMember("Save", System.Reflection.BindingFlags.InvokeMethod, null, shortcut, null);
+                    Assert(NativeShellDropTarget.TryResolveFolderShortcut(shortcutPath, out var resolved) && Path.GetFullPath(resolved) == Path.GetFullPath(moveTarget), "folder shortcuts resolve as drop targets");
+                }
+                finally
+                {
+                    if (shortcut is not null && Marshal.IsComObject(shortcut)) Marshal.FinalReleaseComObject(shortcut);
+                    if (shell is not null && Marshal.IsComObject(shell)) Marshal.FinalReleaseComObject(shell);
+                }
+                var resized = DesktopLayeredOverlayForm.ConstrainSizingRectangle(new Rectangle(-20, -20, 500, 400), new Rectangle(0, 0, 1920, 1040), 4, new Size(240, 140));
+                Assert(resized.Left == 0 && resized.Top == 0 && resized.Right == 480 && resized.Bottom == 380, "top-left resizing keeps opposite corner fixed and stays onscreen");
             }
             finally
             {
@@ -1230,7 +1262,7 @@ internal static class SmokeTests
             {
                 Text = "## 每週回顧\r\n**完成：** Markdown 顯示與安全圓角\r\n- 第一個項目\r\n- 第二個項目\r\n> 這是一段引言\r\n`inline code` 與 [連結](https://example.invalid)\r\n第七行用來確認內容超出時可捲動\r\n第八行仍需保留",
                 X = 40, Y = 40, Width = 420, Height = 180, CornerRadius = 42,
-                GradientEnabled = true, GradientColorArgb = Color.DarkOrange.ToArgb(), GradientDirection = OverlayGradientDirection.DiagonalDown,
+                GradientEnabled = true, GradientColorArgb = Color.DarkOrange.ToArgb(), GradientOpacity = 120, GradientDirection = OverlayGradientDirection.DiagonalDown, GradientMode = OverlayGradientMode.Edges,
                 GradientTransition = 60, TextColorArgb = Color.LightYellow.ToArgb()
             };
             var markdown = MarkdownNoteRenderer.ParseLine("## **標題**與[連結](https://example.invalid)");
@@ -1268,7 +1300,7 @@ internal static class SmokeTests
             using (var distributedForm = new DesktopLayeredNoteForm(distributedNote))
             {
                 distributedForm.RenderForTest();
-                Assert(distributedForm.LastDistributionExtra > 0, "note fill distribution affects content spacing");
+                Assert(distributedForm.LastDistributionExtra == 0, "note distribution no longer changes vertical spacing");
             }
 
             Console.WriteLine($"DESKTOP_VIEW_SMOKE_PASSED CURRENT={current}");

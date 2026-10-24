@@ -12,6 +12,7 @@ namespace DesktopListTool;
 internal enum OverlayTextAlignment { Left, Center, Right }
 internal enum OverlayContentDistribution { Packed, Fill }
 internal enum OverlayGradientDirection { LeftToRight, TopToBottom, DiagonalDown, DiagonalUp }
+internal enum OverlayGradientMode { Single, Sandwich, Edges }
 
 internal sealed class OverlayStyleOptions
 {
@@ -20,8 +21,10 @@ internal sealed class OverlayStyleOptions
     public bool FollowThemeColor { get; set; }
     public bool GradientEnabled { get; set; }
     public Color GradientColor { get; set; } = Color.FromArgb(37, 99, 235);
+    public byte GradientOpacity { get; set; } = 255;
     public int GradientTransition { get; set; } = 50;
     public OverlayGradientDirection GradientDirection { get; set; }
+    public OverlayGradientMode GradientMode { get; set; }
     public Color TextColor { get; set; } = Color.White;
     public string FontFamily { get; set; } = "Microsoft JhengHei UI";
     public float FontSize { get; set; } = 10F;
@@ -127,16 +130,44 @@ internal sealed class SliderNumberControl : UserControl
     }
 }
 
+internal sealed class ColorWithAlphaDialog : Form
+{
+    private Color _color;
+    private readonly Button _colorButton = new() { Text = "選擇顏色…", AutoSize = true };
+    private readonly SliderNumberControl _alpha;
+    public Color SelectedColor => _color;
+    public byte SelectedAlpha => (byte)Math.Round(_alpha.Value / 100M * 255M);
+
+    public ColorWithAlphaDialog(Color color, byte alpha, bool colorEnabled = true)
+    {
+        _color = color;
+        _alpha = new SliderNumberControl(0, 100, Math.Round(alpha / 255M * 100M));
+        Text = "顏色與透明度"; StartPosition = FormStartPosition.CenterParent; FormBorderStyle = FormBorderStyle.FixedDialog;
+        MinimizeBox = false; MaximizeBox = false; ShowInTaskbar = false; ClientSize = new Size(560, 190); Font = new Font("Microsoft JhengHei UI", 10F);
+        var table = new TableLayoutPanel { Dock = DockStyle.Fill, Padding = new Padding(18), ColumnCount = 2, RowCount = 3 };
+        table.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 130)); table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        table.Controls.Add(new Label { Text = "顏色", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 0); table.Controls.Add(_colorButton, 1, 0);
+        table.Controls.Add(new Label { Text = "不透明度", AutoSize = true, Anchor = AnchorStyles.Left }, 0, 1); table.Controls.Add(_alpha, 1, 1);
+        var buttons = new FlowLayoutPanel { AutoSize = true, FlowDirection = FlowDirection.RightToLeft, Dock = DockStyle.Fill };
+        var cancel = new Button { Text = "取消", DialogResult = DialogResult.Cancel, AutoSize = true }; var ok = new Button { Text = "確定", DialogResult = DialogResult.OK, AutoSize = true };
+        buttons.Controls.Add(cancel); buttons.Controls.Add(ok); table.Controls.Add(buttons, 0, 2); table.SetColumnSpan(buttons, 2); Controls.Add(table); AcceptButton = ok; CancelButton = cancel;
+        _colorButton.Click += (_, _) => { using var picker = new ColorDialog { Color = _color, FullOpen = true }; if (picker.ShowDialog(this) == DialogResult.OK) { _color = picker.Color; RefreshColor(); } };
+        _colorButton.Enabled = colorEnabled;
+        RefreshColor();
+    }
+    private void RefreshColor() { _colorButton.BackColor = _color; _colorButton.ForeColor = _color.GetBrightness() < .5F ? Color.White : Color.Black; }
+}
+
 internal sealed class OverlayStyleDialog : Form
 {
-    private readonly Button _color = new() { Text = "選擇顏色…", AutoSize = true };
+    private readonly Button _color = new() { Text = "第一顏色…", AutoSize = true };
     private readonly CheckBox _gradient = new() { Text = "使用漸層背景", AutoSize = true };
     private readonly Button _gradientColor = new() { Text = "第二顏色…", AutoSize = true };
     private readonly SliderNumberControl _gradientTransition;
     private readonly ButtonChoice<OverlayGradientDirection> _gradientDirection = new((OverlayGradientDirection.LeftToRight, "→", "由左到右"), (OverlayGradientDirection.TopToBottom, "↓", "由上到下"), (OverlayGradientDirection.DiagonalDown, "↘", "左上到右下"), (OverlayGradientDirection.DiagonalUp, "↗", "左下到右上"));
+    private readonly ButtonChoice<OverlayGradientMode> _gradientMode = new((OverlayGradientMode.Single, "單層", "單向漸層"), (OverlayGradientMode.Sandwich, "上下夾層", "上下為第一顏色、中央為第二顏色"), (OverlayGradientMode.Edges, "四周", "四周為第一顏色、中央為第二顏色"));
     private readonly Button _textColor = new() { Text = "選擇文字顏色…", AutoSize = true };
     private readonly CheckBox _systemColor = new() { Text = "使用 Windows 系統顏色", AutoSize = true };
-    private readonly SliderNumberControl _opacity;
     private readonly ComboBox _family = new() { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Fill, DrawMode = DrawMode.OwnerDrawFixed, ItemHeight = 34, DropDownWidth = 640, MaxDropDownItems = 16 };
     private readonly ButtonChoice<FontStyle> _weight = new((FontStyle.Regular, "一般", "一般字重"), (FontStyle.Bold, "粗體", "粗體字重"));
     private readonly SliderNumberControl _fontSize;
@@ -144,16 +175,16 @@ internal sealed class OverlayStyleDialog : Form
     private readonly SliderNumberControl _lineSpacing;
     private readonly SliderNumberControl _radius;
     private readonly ButtonChoice<OverlayTextAlignment> _alignment = new((OverlayTextAlignment.Left, "☰←", "靠左"), (OverlayTextAlignment.Center, "☰↔", "置中"), (OverlayTextAlignment.Right, "☰→", "靠右"));
-    private readonly ButtonChoice<OverlayContentDistribution> _distribution = new((OverlayContentDistribution.Packed, "↥ 集中", "集中排列"), (OverlayContentDistribution.Fill, "↕ 分散", "平均分散填滿"));
-    private readonly Panel _preview = new() { Height = 190, Dock = DockStyle.Fill, BackColor = Color.FromArgb(225, 230, 238) };
+    private readonly ButtonChoice<OverlayContentDistribution> _distribution = new((OverlayContentDistribution.Packed, "⇥ 集中", "左右集中排列"), (OverlayContentDistribution.Fill, "↔ 分散", "左右平均分散填滿"));
     private Color _selectedColor;
     private Color _selectedGradientColor;
     private Color _selectedTextColor;
+    private byte _selectedOpacity;
+    private byte _selectedGradientOpacity;
     public event EventHandler? PreviewChanged;
 
     public OverlayStyleDialog(OverlayStyleOptions style, string targetName)
     {
-        _opacity = new SliderNumberControl(0, 100, Math.Round(style.BackgroundOpacity / 255M * 100M));
         _gradientTransition = new SliderNumberControl(0, 100, style.GradientTransition);
         _fontSize = new SliderNumberControl(6, 48, (decimal)style.FontSize, .5M, 1, 10M);
         _lineHeight = new SliderNumberControl(16, 160, style.LineHeight);
@@ -162,8 +193,10 @@ internal sealed class OverlayStyleDialog : Form
         _selectedColor = style.BackgroundColor;
         _selectedGradientColor = style.GradientColor;
         _selectedTextColor = style.TextColor;
+        _selectedOpacity = style.BackgroundOpacity;
+        _selectedGradientOpacity = style.GradientOpacity;
         Text = $"{targetName}樣式"; StartPosition = FormStartPosition.CenterParent; FormBorderStyle = FormBorderStyle.Sizable;
-        MinimumSize = new Size(720, 720); ClientSize = new Size(820, 850); AutoScaleMode = AutoScaleMode.Dpi;
+        MinimumSize = new Size(720, 640); ClientSize = new Size(820, 790); AutoScaleMode = AutoScaleMode.Dpi;
         ShowInTaskbar = false; BackColor = Color.FromArgb(246, 248, 252); Font = new Font("Microsoft JhengHei UI", 10F);
 
         foreach (var item in FontFamily.Families.Select(value => new FontChoice(value.Name, SupportsChinese(value.Name))).OrderByDescending(value => value.SupportsChinese).ThenBy(value => value.Name, StringComparer.CurrentCultureIgnoreCase)) _family.Items.Add(item);
@@ -173,43 +206,45 @@ internal sealed class OverlayStyleDialog : Form
         _family.SelectedItem = _family.Items.Cast<FontChoice>().FirstOrDefault(value => value.Name.Equals(style.FontFamily, StringComparison.OrdinalIgnoreCase));
         if (_family.SelectedIndex < 0 && _family.Items.Count > 0) _family.SelectedItem = _family.Items.Cast<FontChoice>().FirstOrDefault(value => value.Name == "Microsoft JhengHei UI");
         if (_family.SelectedIndex < 0 && _family.Items.Count > 0) _family.SelectedIndex = 0;
-        _weight.Value = style.Bold ? FontStyle.Bold : FontStyle.Regular; _alignment.Value = style.TextAlignment; _distribution.Value = style.Distribution; _gradientDirection.Value = style.GradientDirection;
+        _weight.Value = style.Bold ? FontStyle.Bold : FontStyle.Regular; _alignment.Value = style.TextAlignment; _distribution.Value = style.Distribution; _gradientDirection.Value = style.GradientDirection; _gradientMode.Value = style.GradientMode;
         UpdateWeightButtons();
 
         var table = new TableLayoutPanel { Dock = DockStyle.Fill, AutoScroll = true, Padding = new Padding(22), ColumnCount = 2, RowCount = 18 };
         table.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 210)); table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        for (var i = 0; i < 17; i++) table.RowStyles.Add(new RowStyle(SizeType.AutoSize)); table.RowStyles.Add(new RowStyle(SizeType.Absolute, 200));
-        AddRow(table, 0, "背景顏色", _color); AddRow(table, 1, "系統顏色", _systemColor); AddRow(table, 2, "透明度", _opacity);
-        AddRow(table, 3, "漸層", _gradient); AddRow(table, 4, "漸層顏色", _gradientColor); AddRow(table, 5, "漸層過渡", _gradientTransition); AddRow(table, 6, "漸層方向", _gradientDirection);
-        var clear = new Button { Text = "恢復完全透明", AutoSize = true }; clear.Click += (_, _) => _opacity.Value = 0; AddRow(table, 7, "背景重設", clear);
+        for (var i = 0; i < 18; i++) table.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        AddRow(table, 0, "背景顏色與透明度", _color); AddRow(table, 1, "系統顏色", _systemColor);
+        AddRow(table, 2, "漸層", _gradient); AddRow(table, 3, "第二顏色與透明度", _gradientColor);
+        var gradientActions = new FlowLayoutPanel { AutoSize = true, WrapContents = false };
+        var swap = new Button { Text = "⇅ 反轉顏色", AutoSize = true }; swap.Click += (_, _) => { (_selectedColor, _selectedGradientColor) = (_selectedGradientColor, _selectedColor); (_selectedOpacity, _selectedGradientOpacity) = (_selectedGradientOpacity, _selectedOpacity); _systemColor.Checked = false; UpdatePreview(); };
+        gradientActions.Controls.Add(swap); gradientActions.Controls.Add(_gradientMode); AddRow(table, 4, "漸層樣式", gradientActions);
+        AddRow(table, 5, "漸層過渡", _gradientTransition); AddRow(table, 6, "漸層方向", _gradientDirection);
+        var clear = new Button { Text = "恢復完全透明", AutoSize = true }; clear.Click += (_, _) => { _selectedOpacity = 0; _selectedGradientOpacity = 0; UpdatePreview(); }; AddRow(table, 7, "背景重設", clear);
         var fontPanel = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 2 };
         fontPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize)); fontPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         var resetFont = new Button { Text = "預設", AutoSize = true, Margin = new Padding(0, 0, 8, 0) }; resetFont.Click += (_, _) => _family.SelectedItem = _family.Items.Cast<FontChoice>().FirstOrDefault(value => value.Name == "Microsoft JhengHei UI");
         fontPanel.Controls.Add(resetFont, 0, 0); fontPanel.Controls.Add(_family, 1, 0); AddRow(table, 8, "字型", fontPanel);
         AddRow(table, 9, "字體顏色", _textColor); AddRow(table, 10, "字體大小", _fontSize); AddRow(table, 11, "字體粗細", _weight); AddRow(table, 12, "行高", _lineHeight);
         AddRow(table, 13, "行距／項目間距", _lineSpacing); AddRow(table, 14, "圓角大小（0 為直角）", _radius);
-        AddRow(table, 15, "文字對齊", _alignment); AddRow(table, 16, "內容排列", _distribution);
-        table.Controls.Add(_preview, 0, 17); table.SetColumnSpan(_preview, 2);
+        AddRow(table, 15, "文字對齊", _alignment); AddRow(table, 16, "內容排列（左右）", _distribution);
 
         var buttons = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 62, FlowDirection = FlowDirection.RightToLeft, Padding = new Padding(10) };
         var cancel = new Button { Text = "取消", DialogResult = DialogResult.Cancel, Size = new Size(100, 38) };
         var ok = new Button { Text = "確定", DialogResult = DialogResult.OK, Size = new Size(100, 38) };
         buttons.Controls.AddRange([cancel, ok]); Controls.Add(table); Controls.Add(buttons); CancelButton = cancel;
-        _color.Click += (_, _) => ChooseColor(ref _selectedColor, _color, disableSystemColor: true); _gradientColor.Click += (_, _) => ChooseColor(ref _selectedGradientColor, _gradientColor); _textColor.Click += (_, _) => ChooseColor(ref _selectedTextColor, _textColor);
+        _color.Click += (_, _) => ChooseColorWithAlpha(ref _selectedColor, ref _selectedOpacity, _color, true); _gradientColor.Click += (_, _) => ChooseColorWithAlpha(ref _selectedGradientColor, ref _selectedGradientOpacity, _gradientColor, false); _textColor.Click += (_, _) => ChooseColor(ref _selectedTextColor, _textColor);
         _systemColor.CheckedChanged += (_, _) => UpdatePreview(); _gradient.CheckedChanged += (_, _) => UpdatePreview();
-        foreach (var slider in new[] { _opacity, _gradientTransition, _fontSize, _lineHeight, _lineSpacing, _radius }) slider.ValueChanged += (_, _) => UpdatePreview();
+        foreach (var slider in new[] { _gradientTransition, _fontSize, _lineHeight, _lineSpacing, _radius }) slider.ValueChanged += (_, _) => UpdatePreview();
         _family.SelectedIndexChanged += (_, _) => { UpdateWeightButtons(); UpdatePreview(); };
         _weight.ValueChanged += (_, _) => UpdatePreview(); _alignment.ValueChanged += (_, _) => UpdatePreview();
-        _distribution.ValueChanged += (_, _) => UpdatePreview(); _gradientDirection.ValueChanged += (_, _) => UpdatePreview();
-        _preview.Paint += DrawPreview; UpdatePreview();
-        Shown += (_, _) => { if (Environment.GetEnvironmentVariable("DESKTOP_LIST_QA_SCROLL_PREVIEW") == "1") table.ScrollControlIntoView(_preview); };
+        _distribution.ValueChanged += (_, _) => UpdatePreview(); _gradientDirection.ValueChanged += (_, _) => UpdatePreview(); _gradientMode.ValueChanged += (_, _) => UpdatePreview();
+        UpdatePreview();
     }
 
     public OverlayStyleOptions SelectedStyle => new()
     {
         BackgroundColor = _systemColor.Checked ? OverlayAppearanceSettings.GetWindowsThemeColor() : _selectedColor,
-        BackgroundOpacity = (byte)Math.Round(_opacity.Value / 100M * 255M), FollowThemeColor = _systemColor.Checked,
-        GradientEnabled = _gradient.Checked, GradientColor = _selectedGradientColor, GradientTransition = (int)_gradientTransition.Value, GradientDirection = _gradientDirection.Value,
+        BackgroundOpacity = _selectedOpacity, FollowThemeColor = _systemColor.Checked,
+        GradientEnabled = _gradient.Checked, GradientColor = _selectedGradientColor, GradientOpacity = _selectedGradientOpacity, GradientTransition = (int)_gradientTransition.Value, GradientDirection = _gradientDirection.Value, GradientMode = _gradientMode.Value,
         TextColor = _selectedTextColor, FontFamily = (_family.SelectedItem as FontChoice)?.Name ?? "Microsoft JhengHei UI", FontSize = (float)_fontSize.Value, Bold = _weight.Value == FontStyle.Bold,
         LineHeight = (int)_lineHeight.Value, LineSpacing = (int)_lineSpacing.Value, CornerRadius = (int)_radius.Value,
         TextAlignment = _alignment.Value, Distribution = _distribution.Value
@@ -226,24 +261,21 @@ internal sealed class OverlayStyleDialog : Form
         if (picker.ShowDialog(this) != DialogResult.OK) return;
         target = picker.Color; if (disableSystemColor) _systemColor.Checked = false; UpdatePreview();
     }
+    private void ChooseColorWithAlpha(ref Color target, ref byte alpha, Button button, bool disableSystemColor)
+    {
+        var usingSystemColor = disableSystemColor && _systemColor.Checked;
+        using var dialog = new ColorWithAlphaDialog(usingSystemColor ? OverlayAppearanceSettings.GetWindowsThemeColor() : target, alpha, !usingSystemColor);
+        if (dialog.ShowDialog(this) != DialogResult.OK) return;
+        if (!usingSystemColor) target = dialog.SelectedColor;
+        alpha = dialog.SelectedAlpha;
+        if (disableSystemColor && !usingSystemColor) _systemColor.Checked = false;
+        UpdatePreview();
+    }
     private void UpdatePreview()
     {
-        _color.Enabled = !_systemColor.Checked; SetColorButton(_color, _selectedColor); SetColorButton(_gradientColor, _selectedGradientColor); SetColorButton(_textColor, _selectedTextColor);
-        _gradientColor.Enabled = _gradient.Checked; _gradientTransition.Enabled = _gradient.Checked; _gradientDirection.Enabled = _gradient.Checked;
-        _preview.Invalidate(); PreviewChanged?.Invoke(this, EventArgs.Empty);
-    }
-    private void DrawPreview(object? sender, PaintEventArgs e)
-    {
-        e.Graphics.Clear(_preview.BackColor); e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-        var style = SelectedStyle; var bounds = Rectangle.Inflate(_preview.ClientRectangle, -4, -4);
-        using var background = OverlayStyleRendering.CreateBackgroundBrush(bounds, style, style.BackgroundColor);
-        if (style.CornerRadius > 0) e.Graphics.FillRoundedRectangle(background, bounds, Math.Min(style.CornerRadius, Math.Min(bounds.Width, bounds.Height) / 2)); else e.Graphics.FillRectangle(background, bounds);
-        using var font = CreateFont(style); using var brush = new SolidBrush(style.TextColor);
-        using var format = new StringFormat { Alignment = style.TextAlignment switch { OverlayTextAlignment.Center => StringAlignment.Center, OverlayTextAlignment.Right => StringAlignment.Far, _ => StringAlignment.Near } };
-        var inset = Math.Max(16, style.CornerRadius); var textBounds = RectangleF.FromLTRB(bounds.Left + inset, bounds.Top + 12, bounds.Right - inset, bounds.Bottom - 12);
-        var firstY = textBounds.Top; var secondY = Math.Min(textBounds.Bottom - font.Height, firstY + Math.Max(style.LineHeight, font.Height) + style.LineSpacing);
-        e.Graphics.DrawString("樣式即時預覽  Aa  中文", font, brush, new RectangleF(textBounds.X, firstY, textBounds.Width, font.Height + 8), format);
-        e.Graphics.DrawString("第二行文字與行距", font, brush, new RectangleF(textBounds.X, secondY, textBounds.Width, font.Height + 8), format);
+        _color.Enabled = true; SetColorButton(_color, _systemColor.Checked ? OverlayAppearanceSettings.GetWindowsThemeColor() : _selectedColor, _selectedOpacity); SetColorButton(_gradientColor, _selectedGradientColor, _selectedGradientOpacity); SetColorButton(_textColor, _selectedTextColor, 255);
+        _gradientColor.Enabled = _gradient.Checked; _gradientTransition.Enabled = _gradient.Checked; _gradientDirection.Enabled = _gradient.Checked && _gradientMode.Value == OverlayGradientMode.Single; _gradientMode.Enabled = _gradient.Checked;
+        PreviewChanged?.Invoke(this, EventArgs.Empty);
     }
     private void DrawFontItem(object? sender, DrawItemEventArgs e)
     {
@@ -255,7 +287,7 @@ internal sealed class OverlayStyleDialog : Form
         if (!supported) { var width = e.Graphics.MeasureString(name, nameFont).Width; e.Graphics.DrawString("（不支援中文）", warningFont, brush, e.Bounds.X + 5 + width, e.Bounds.Y + 4); }
         e.DrawFocusRectangle();
     }
-    private static void SetColorButton(Button button, Color color) { button.BackColor = color; button.ForeColor = color.GetBrightness() < .5F ? Color.White : Color.Black; }
+    private static void SetColorButton(Button button, Color color, byte alpha) { button.BackColor = color; button.ForeColor = color.GetBrightness() < .5F ? Color.White : Color.Black; button.Text = button.Text.Split('（')[0].TrimEnd() + $"（{Math.Round(alpha / 255D * 100D)}%）"; }
     private void UpdateWeightButtons()
     {
         var family = (_family.SelectedItem as FontChoice)?.Name ?? "Microsoft JhengHei UI";
@@ -293,9 +325,22 @@ internal static class OverlayStyleRendering
 {
     public static Brush CreateBackgroundBrush(Rectangle bounds, OverlayStyleOptions style, Color primary)
     {
-        var alpha = Math.Max(1, (int)style.BackgroundOpacity);
-        var first = Color.FromArgb(alpha, primary); var second = Color.FromArgb(alpha, style.GradientColor);
+        var first = Color.FromArgb(style.BackgroundOpacity, primary); var second = Color.FromArgb(style.GradientOpacity, style.GradientColor);
         if (!style.GradientEnabled || bounds.Width <= 1 || bounds.Height <= 1) return new SolidBrush(first);
+        if (style.GradientMode == OverlayGradientMode.Edges)
+        {
+            var path = new GraphicsPath(); path.AddRectangle(bounds);
+            var radial = new PathGradientBrush(path) { CenterColor = second, SurroundColors = [first] };
+            var focus = Math.Clamp(style.GradientTransition / 100F, .02F, .98F); radial.FocusScales = new PointF(focus, focus);
+            path.Dispose(); return radial;
+        }
+        if (style.GradientMode == OverlayGradientMode.Sandwich)
+        {
+            var vertical = new LinearGradientBrush(bounds, first, first, 90F);
+            var center = Math.Clamp(style.GradientTransition / 100F, .05F, .95F);
+            vertical.InterpolationColors = new ColorBlend { Colors = [first, second, first], Positions = [0F, center, 1F] };
+            return vertical;
+        }
         var angle = style.GradientDirection switch { OverlayGradientDirection.TopToBottom => 90F, OverlayGradientDirection.DiagonalDown => 45F, OverlayGradientDirection.DiagonalUp => 315F, _ => 0F };
         var brush = new LinearGradientBrush(bounds, first, second, angle);
         var position = Math.Clamp(style.GradientTransition / 100F, .02F, .98F);
@@ -318,8 +363,10 @@ internal static class OverlayAppearanceSettings
             if (key.GetValue("FollowThemeColor") is int follow) result.FollowThemeColor = follow != 0;
             if (key.GetValue("GradientEnabled") is int gradient) result.GradientEnabled = gradient != 0;
             if (key.GetValue("GradientColor") is int gradientRgb) result.GradientColor = Color.FromArgb((gradientRgb >> 16) & 255, (gradientRgb >> 8) & 255, gradientRgb & 255);
+            result.GradientOpacity = key.GetValue("GradientOpacity") is int gradientOpacity ? (byte)Math.Clamp(gradientOpacity, 0, 255) : result.BackgroundOpacity;
             if (key.GetValue("GradientTransition") is int transition) result.GradientTransition = Math.Clamp(transition, 0, 100);
             if (key.GetValue("GradientDirection") is int direction && Enum.IsDefined(typeof(OverlayGradientDirection), direction)) result.GradientDirection = (OverlayGradientDirection)direction;
+            if (key.GetValue("GradientMode") is int mode && Enum.IsDefined(typeof(OverlayGradientMode), mode)) result.GradientMode = (OverlayGradientMode)mode;
             if (key.GetValue("TextColor") is int textRgb) result.TextColor = Color.FromArgb((textRgb >> 16) & 255, (textRgb >> 8) & 255, textRgb & 255);
             if (key.GetValue("FontFamily") is string family && family.Length > 0) result.FontFamily = family;
             if (key.GetValue("FontSizeX10") is int size) result.FontSize = Math.Clamp(size / 10F, 6F, 48F);
@@ -343,7 +390,7 @@ internal static class OverlayAppearanceSettings
             key.SetValue("BackgroundOpacity", style.BackgroundOpacity, RegistryValueKind.DWord); key.SetValue("FollowThemeColor", style.FollowThemeColor ? 1 : 0, RegistryValueKind.DWord);
             var gradient = style.GradientColor; var text = style.TextColor;
             key.SetValue("GradientEnabled", style.GradientEnabled ? 1 : 0, RegistryValueKind.DWord); key.SetValue("GradientColor", (gradient.R << 16) | (gradient.G << 8) | gradient.B, RegistryValueKind.DWord);
-            key.SetValue("GradientTransition", style.GradientTransition, RegistryValueKind.DWord); key.SetValue("GradientDirection", (int)style.GradientDirection, RegistryValueKind.DWord);
+            key.SetValue("GradientOpacity", style.GradientOpacity, RegistryValueKind.DWord); key.SetValue("GradientTransition", style.GradientTransition, RegistryValueKind.DWord); key.SetValue("GradientDirection", (int)style.GradientDirection, RegistryValueKind.DWord); key.SetValue("GradientMode", (int)style.GradientMode, RegistryValueKind.DWord);
             key.SetValue("TextColor", (text.R << 16) | (text.G << 8) | text.B, RegistryValueKind.DWord);
             key.SetValue("FontFamily", style.FontFamily, RegistryValueKind.String); key.SetValue("FontSizeX10", (int)Math.Round(style.FontSize * 10), RegistryValueKind.DWord);
             key.SetValue("FontBold", style.Bold ? 1 : 0, RegistryValueKind.DWord); key.SetValue("LineHeight", style.LineHeight, RegistryValueKind.DWord);

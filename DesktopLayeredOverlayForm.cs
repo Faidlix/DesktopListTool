@@ -40,6 +40,8 @@ internal sealed class DesktopLayeredOverlayForm : Form
     private Point _dragStart;
     private int _dragCandidateIndex = -1;
     private int _dropFolderIndex = -1;
+    private string? _dropTargetPath;
+    private bool _dropIsArchive;
     private int _dropInsertIndex = -1;
     private OverlaySortMode _sortMode;
     private bool _sortAscending;
@@ -181,6 +183,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
     {
         BackgroundColor = Color.Black,
         BackgroundOpacity = 0,
+        GradientOpacity = 0,
         FontSize = size switch { ListItemSize.Compact => 9F, ListItemSize.Large => 12F, _ => 10F },
         LineHeight = size switch { ListItemSize.Compact => 28, ListItemSize.Large => 46, _ => 36 }
     };
@@ -248,16 +251,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
     private bool UseHorizontalLayout => ClientSize.Width >= ClientSize.Height * 1.35;
 
     private int RowsPerColumn => Math.Max(1, (ClientSize.Height - ContentPadding * 2) / Math.Max(1, _rowHeight));
-    private int LayoutRowHeight
-    {
-        get
-        {
-            if (_style.Distribution != OverlayContentDistribution.Fill || _entries.Count == 0) return _rowHeight;
-            var available = Math.Max(_rowHeight, ClientSize.Height - ContentPadding * 2);
-            var rows = UseHorizontalLayout ? Math.Min(_entries.Count, RowsPerColumn) : _entries.Count;
-            return Math.Max(_rowHeight, available / Math.Max(1, rows));
-        }
-    }
+    private int LayoutRowHeight => _rowHeight;
 
     private void HandleMouseMove(object? sender, MouseEventArgs e)
     {
@@ -442,7 +436,8 @@ internal sealed class DesktopLayeredOverlayForm : Form
                 if (_style.CornerRadius > 0) graphics.DrawRoundedRectangle(framePen, frameBounds, Math.Min(_style.CornerRadius, Math.Min(frameBounds.Width, frameBounds.Height) / 2));
                 else graphics.DrawRectangle(framePen, frameBounds);
                 using var gripBrush = new SolidBrush(Color.FromArgb(235, 96, 165, 250));
-                graphics.FillRectangle(gripBrush, ClientSize.Width - 14, ClientSize.Height - 14, 11, 11);
+                graphics.FillRectangle(gripBrush, 3, 3, 10, 10); graphics.FillRectangle(gripBrush, ClientSize.Width - 13, 3, 10, 10);
+                graphics.FillRectangle(gripBrush, 3, ClientSize.Height - 13, 10, 10); graphics.FillRectangle(gripBrush, ClientSize.Width - 13, ClientSize.Height - 13, 10, 10);
             }
             if (_isFloating)
                 DrawFloatingReturnButton(graphics);
@@ -503,13 +498,23 @@ internal sealed class DesktopLayeredOverlayForm : Form
         var textY = visualBounds.Y + (visualBounds.Height - _itemFont.GetHeight(graphics)) / 2F;
         using var shadowBrush = new SolidBrush(Color.FromArgb(210, 0, 0, 0));
         using var textBrush = new SolidBrush(_style.TextColor);
-        graphics.DrawString(entry.Name, _itemFont, shadowBrush, textX + 1, textY + 1);
-        graphics.DrawString(entry.Name, _itemFont, textBrush, textX, textY);
+        DrawEntryText(graphics, entry.Name, textX, textY, Math.Max(1, visualBounds.Right - textX - 5), shadowBrush, textBrush);
         if (index == _dropFolderIndex)
         {
             using var targetPen = new Pen(Color.FromArgb(245, 96, 165, 250), 2F);
             graphics.DrawRectangle(targetPen, Rectangle.Inflate(visualBounds, -1, -1));
         }
+    }
+
+    private void DrawEntryText(Graphics graphics, string text, float x, float y, float width, Brush shadow, Brush foreground)
+    {
+        if (_style.Distribution != OverlayContentDistribution.Fill || text.Length < 2)
+        {
+            graphics.DrawString(text, _itemFont, shadow, x + 1, y + 1); graphics.DrawString(text, _itemFont, foreground, x, y); return;
+        }
+        var widths = text.Select(value => graphics.MeasureString(value.ToString(), _itemFont, PointF.Empty, StringFormat.GenericTypographic).Width).ToArray();
+        var extra = Math.Max(0, width - widths.Sum()) / (text.Length - 1); var cursor = x;
+        for (var i = 0; i < text.Length; i++) { var value = text[i].ToString(); graphics.DrawString(value, _itemFont, shadow, cursor + 1, y + 1, StringFormat.GenericTypographic); graphics.DrawString(value, _itemFont, foreground, cursor, y, StringFormat.GenericTypographic); cursor += widths[i] + extra; }
     }
 
     private Rectangle GetVisualEntryBounds(LayeredEntry entry, Rectangle rowBounds)
@@ -545,7 +550,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
     {
         if (_dropFolderIndex < 0 || _dropFolderIndex >= _entries.Count)
             return;
-        var text = $"→ {(_dropIsCopy ? "複製至" : "移動至")} {_entries[_dropFolderIndex].Name}";
+        var text = _dropIsArchive ? $"→ 加入壓縮檔 {_entries[_dropFolderIndex].Name}" : $"→ {(_dropIsCopy ? "複製至" : "移動至")} {_entries[_dropFolderIndex].Name}";
         using var font = new Font("Microsoft JhengHei UI", 10F);
         var size = TextRenderer.MeasureText(text, font, Size.Empty, TextFormatFlags.NoPadding);
         var x = Math.Clamp(_lastDragClientPoint.X + 18, 4, Math.Max(4, ClientSize.Width - size.Width - 22));
@@ -791,8 +796,15 @@ internal sealed class DesktopLayeredOverlayForm : Form
         _lastDragClientPoint = client;
         var index = GetEntryIndexAt(client);
         var sourcePath = e.Data.GetData("DesktopListTool.SourcePath") as string;
-        _dropFolderIndex = index >= 0 && _entries[index].IsDirectory && !_entries[index].IsVirtual &&
-            !string.Equals(sourcePath, _entries[index].Path, StringComparison.OrdinalIgnoreCase) && IsFolderDropZone(client, index) ? index : -1;
+        _dropTargetPath = null; _dropIsArchive = false; _dropFolderIndex = -1;
+        if (index >= 0 && !_entries[index].IsVirtual && !string.Equals(sourcePath, _entries[index].Path, StringComparison.OrdinalIgnoreCase) && IsFolderDropZone(client, index))
+        {
+            var candidate = _entries[index];
+            if (candidate.IsDirectory) _dropTargetPath = candidate.Path;
+            else if (NativeShellDropTarget.TryResolveFolderShortcut(candidate.Path, out var shortcutFolder)) _dropTargetPath = shortcutFolder;
+            else if (NativeShellDropTarget.IsArchivePath(candidate.Path)) { _dropTargetPath = candidate.Path; _dropIsArchive = true; }
+            if (_dropTargetPath is not null) _dropFolderIndex = index;
+        }
         _dropInsertIndex = _dropFolderIndex >= 0 ? -1 : GetInsertionIndex(client);
         _dropIsCopy = (e.KeyState & 8) != 0;
         e.Effect = _dropIsCopy ? DragDropEffects.Copy : DragDropEffects.Move;
@@ -843,7 +855,12 @@ internal sealed class DesktopLayeredOverlayForm : Form
         {
             if (_dropFolderIndex >= 0)
             {
-                TransferPaths(paths, _entries[_dropFolderIndex].Path, e.Effect == DragDropEffects.Copy);
+                if (_dropTargetPath is null) return;
+                if (_dropIsArchive)
+                {
+                    if (!NativeShellDropTarget.TryDropIsolated(_dropTargetPath, paths, e.Effect == DragDropEffects.Copy)) throw new IOException("無法啟動壓縮檔的系統拖放處理程式。");
+                }
+                else TransferPaths(paths, _dropTargetPath, e.Effect == DragDropEffects.Copy);
             }
             else if (paths.Length == 1 && e.Data!.GetDataPresent("DesktopListTool.SourcePath") &&
                      _entries.Any(item => string.Equals(item.Path, paths[0], StringComparison.OrdinalIgnoreCase)))
@@ -915,6 +932,8 @@ internal sealed class DesktopLayeredOverlayForm : Form
     private void ClearDropFeedback()
     {
         _dropFolderIndex = -1;
+        _dropTargetPath = null;
+        _dropIsArchive = false;
         _dropInsertIndex = -1;
         _dropIsCopy = false;
         if (IsHandleCreated) RenderLayer();
@@ -962,6 +981,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
     {
         const int WmNcHitTest = 0x0084;
         const int WmMoving = 0x0216;
+        const int WmSizing = 0x0214;
         const int WmExitSizeMove = 0x0232;
         const int HtCaption = 2;
         const int HtBottomRight = 17;
@@ -972,6 +992,12 @@ internal sealed class DesktopLayeredOverlayForm : Form
             if (!_isFloating && ResolvePlacement is not null)
                 movingBounds = ResolvePlacement(this, movingBounds);
             Marshal.StructureToPtr(NativeRect.FromRectangle(movingBounds), message.LParam, false);
+        }
+        if (message.Msg == WmSizing && message.LParam != IntPtr.Zero)
+        {
+            var sizingBounds = Marshal.PtrToStructure<NativeRect>(message.LParam).ToRectangle();
+            sizingBounds = ConstrainSizingRectangle(sizingBounds, Screen.FromRectangle(sizingBounds).WorkingArea, message.WParam.ToInt32(), MinimumSize);
+            Marshal.StructureToPtr(NativeRect.FromRectangle(sizingBounds), message.LParam, false);
         }
 
         base.WndProc(ref message);
@@ -988,8 +1014,10 @@ internal sealed class DesktopLayeredOverlayForm : Form
 
         var screenPoint = new Point((short)(message.LParam.ToInt64() & 0xFFFF), (short)((message.LParam.ToInt64() >> 16) & 0xFFFF));
         var clientPoint = PointToClient(screenPoint);
-        if (clientPoint.X >= ClientSize.Width - 18 && clientPoint.Y >= ClientSize.Height - 18)
-            message.Result = (IntPtr)HtBottomRight;
+        if (clientPoint.X < 18 && clientPoint.Y < 18) message.Result = (IntPtr)13;
+        else if (clientPoint.X >= ClientSize.Width - 18 && clientPoint.Y < 18) message.Result = (IntPtr)14;
+        else if (clientPoint.X < 18 && clientPoint.Y >= ClientSize.Height - 18) message.Result = (IntPtr)16;
+        else if (clientPoint.X >= ClientSize.Width - 18 && clientPoint.Y >= ClientSize.Height - 18) message.Result = (IntPtr)HtBottomRight;
         else if (clientPoint.X < 10 || clientPoint.Y < 10 || clientPoint.X > ClientSize.Width - 10 || clientPoint.Y > ClientSize.Height - 10)
             message.Result = (IntPtr)HtCaption;
     }
@@ -1021,6 +1049,15 @@ internal sealed class DesktopLayeredOverlayForm : Form
         bounds.X = Math.Clamp(bounds.X, workArea.Left, maximumX);
         bounds.Y = Math.Clamp(bounds.Y, workArea.Top, maximumY);
         return bounds;
+    }
+
+    internal static Rectangle ConstrainSizingRectangle(Rectangle bounds, Rectangle workArea, int edge, Size minimum)
+    {
+        var left = bounds.Left; var top = bounds.Top; var right = bounds.Right; var bottom = bounds.Bottom;
+        var sizesLeft = edge is 1 or 4 or 7; var sizesTop = edge is 3 or 4 or 5;
+        if (sizesLeft) left = Math.Max(workArea.Left, Math.Min(left, right - minimum.Width)); else right = Math.Min(workArea.Right, Math.Max(right, left + minimum.Width));
+        if (sizesTop) top = Math.Max(workArea.Top, Math.Min(top, bottom - minimum.Height)); else bottom = Math.Min(workArea.Bottom, Math.Max(bottom, top + minimum.Height));
+        return Rectangle.FromLTRB(left, top, right, bottom);
     }
 
     private void ApplyLayeredBitmap(Bitmap bitmap)
