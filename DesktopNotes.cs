@@ -20,6 +20,11 @@ internal sealed class DesktopNoteData
     public int BackgroundColorArgb { get; set; } = Color.FromArgb(30, 41, 59).ToArgb();
     public byte BackgroundOpacity { get; set; } = 96;
     public bool FollowThemeColor { get; set; } = true;
+    public bool GradientEnabled { get; set; }
+    public int GradientColorArgb { get; set; } = Color.FromArgb(37, 99, 235).ToArgb();
+    public int GradientTransition { get; set; } = 50;
+    public OverlayGradientDirection GradientDirection { get; set; }
+    public int TextColorArgb { get; set; } = Color.White.ToArgb();
     public bool IsFloating { get; set; }
     public string FontFamily { get; set; } = "Microsoft JhengHei UI";
     public float FontSize { get; set; } = 11F;

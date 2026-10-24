@@ -11,12 +11,18 @@ namespace DesktopListTool;
 
 internal enum OverlayTextAlignment { Left, Center, Right }
 internal enum OverlayContentDistribution { Packed, Fill }
+internal enum OverlayGradientDirection { LeftToRight, TopToBottom, DiagonalDown, DiagonalUp }
 
 internal sealed class OverlayStyleOptions
 {
     public Color BackgroundColor { get; set; } = Color.Black;
     public byte BackgroundOpacity { get; set; }
     public bool FollowThemeColor { get; set; }
+    public bool GradientEnabled { get; set; }
+    public Color GradientColor { get; set; } = Color.FromArgb(37, 99, 235);
+    public int GradientTransition { get; set; } = 50;
+    public OverlayGradientDirection GradientDirection { get; set; }
+    public Color TextColor { get; set; } = Color.White;
     public string FontFamily { get; set; } = "Microsoft JhengHei UI";
     public float FontSize { get; set; } = 10F;
     public bool Bold { get; set; }
@@ -26,6 +32,44 @@ internal sealed class OverlayStyleOptions
     public OverlayTextAlignment TextAlignment { get; set; }
     public OverlayContentDistribution Distribution { get; set; }
     public OverlayStyleOptions Clone() => (OverlayStyleOptions)MemberwiseClone();
+}
+
+internal static class OverlayStyleClipboard
+{
+    private static OverlayStyleOptions? _style;
+    public static bool HasStyle => _style is not null;
+    public static void Copy(OverlayStyleOptions style) => _style = style.Clone();
+    public static OverlayStyleOptions? Paste() => _style?.Clone();
+}
+
+internal sealed class ButtonChoice<T> : FlowLayoutPanel where T : struct, Enum
+{
+    private readonly Dictionary<T, Button> _buttons = [];
+    private T _value;
+    public event EventHandler? ValueChanged;
+    public ButtonChoice(params (T Value, string Text, string Tip)[] choices)
+    {
+        AutoSize = true; WrapContents = false; FlowDirection = FlowDirection.LeftToRight;
+        var tips = new ToolTip();
+        foreach (var choice in choices)
+        {
+            var button = new Button { Text = choice.Text, AutoSize = true, MinimumSize = new Size(54, 36), FlatStyle = FlatStyle.Flat, Margin = new Padding(0, 0, 6, 0), Tag = choice.Value };
+            button.Click += (_, _) => Value = choice.Value; tips.SetToolTip(button, choice.Tip); _buttons[choice.Value] = button; Controls.Add(button);
+        }
+    }
+    [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+    public T Value { get => _value; set { _value = value; UpdateButtons(); ValueChanged?.Invoke(this, EventArgs.Empty); } }
+    public void SetVisible(T value, bool visible) { if (_buttons.TryGetValue(value, out var button)) button.Visible = visible; }
+    internal bool IsOptionVisible(T value) => _buttons.TryGetValue(value, out var button) && button.Visible;
+    private void UpdateButtons()
+    {
+        foreach (var pair in _buttons) { var selected = EqualityComparer<T>.Default.Equals(pair.Key, _value); pair.Value.BackColor = selected ? Color.FromArgb(37, 99, 235) : SystemColors.Control; pair.Value.ForeColor = selected ? Color.White : SystemColors.ControlText; pair.Value.FlatAppearance.BorderColor = selected ? Color.FromArgb(29, 78, 216) : Color.FromArgb(190, 198, 210); }
+    }
+}
+
+internal sealed record FontChoice(string Name, bool SupportsChinese)
+{
+    public override string ToString() => Name;
 }
 
 internal sealed class SliderNumberControl : UserControl
@@ -86,72 +130,89 @@ internal sealed class SliderNumberControl : UserControl
 internal sealed class OverlayStyleDialog : Form
 {
     private readonly Button _color = new() { Text = "選擇顏色…", AutoSize = true };
+    private readonly CheckBox _gradient = new() { Text = "使用漸層背景", AutoSize = true };
+    private readonly Button _gradientColor = new() { Text = "第二顏色…", AutoSize = true };
+    private readonly SliderNumberControl _gradientTransition;
+    private readonly ButtonChoice<OverlayGradientDirection> _gradientDirection = new((OverlayGradientDirection.LeftToRight, "→", "由左到右"), (OverlayGradientDirection.TopToBottom, "↓", "由上到下"), (OverlayGradientDirection.DiagonalDown, "↘", "左上到右下"), (OverlayGradientDirection.DiagonalUp, "↗", "左下到右上"));
+    private readonly Button _textColor = new() { Text = "選擇文字顏色…", AutoSize = true };
     private readonly CheckBox _systemColor = new() { Text = "使用 Windows 系統顏色", AutoSize = true };
     private readonly SliderNumberControl _opacity;
-    private readonly ComboBox _family = new() { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Fill, DrawMode = DrawMode.OwnerDrawFixed, ItemHeight = 30 };
-    private readonly ComboBox _weight = new() { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Fill };
+    private readonly ComboBox _family = new() { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Fill, DrawMode = DrawMode.OwnerDrawFixed, ItemHeight = 34, DropDownWidth = 640, MaxDropDownItems = 16 };
+    private readonly ButtonChoice<FontStyle> _weight = new((FontStyle.Regular, "一般", "一般字重"), (FontStyle.Bold, "粗體", "粗體字重"));
     private readonly SliderNumberControl _fontSize;
     private readonly SliderNumberControl _lineHeight;
     private readonly SliderNumberControl _lineSpacing;
     private readonly SliderNumberControl _radius;
-    private readonly ComboBox _alignment = new() { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Fill };
-    private readonly ComboBox _distribution = new() { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Fill };
-    private readonly Panel _preview = new() { Height = 130, Dock = DockStyle.Fill, BackColor = Color.FromArgb(225, 230, 238) };
+    private readonly ButtonChoice<OverlayTextAlignment> _alignment = new((OverlayTextAlignment.Left, "☰←", "靠左"), (OverlayTextAlignment.Center, "☰↔", "置中"), (OverlayTextAlignment.Right, "☰→", "靠右"));
+    private readonly ButtonChoice<OverlayContentDistribution> _distribution = new((OverlayContentDistribution.Packed, "↥ 集中", "集中排列"), (OverlayContentDistribution.Fill, "↕ 分散", "平均分散填滿"));
+    private readonly Panel _preview = new() { Height = 190, Dock = DockStyle.Fill, BackColor = Color.FromArgb(225, 230, 238) };
     private Color _selectedColor;
+    private Color _selectedGradientColor;
+    private Color _selectedTextColor;
     public event EventHandler? PreviewChanged;
 
     public OverlayStyleDialog(OverlayStyleOptions style, string targetName)
     {
         _opacity = new SliderNumberControl(0, 100, Math.Round(style.BackgroundOpacity / 255M * 100M));
+        _gradientTransition = new SliderNumberControl(0, 100, style.GradientTransition);
         _fontSize = new SliderNumberControl(6, 48, (decimal)style.FontSize, .5M, 1, 10M);
         _lineHeight = new SliderNumberControl(16, 160, style.LineHeight);
         _lineSpacing = new SliderNumberControl(0, 48, style.LineSpacing);
         _radius = new SliderNumberControl(0, 80, style.CornerRadius);
         _selectedColor = style.BackgroundColor;
+        _selectedGradientColor = style.GradientColor;
+        _selectedTextColor = style.TextColor;
         Text = $"{targetName}樣式"; StartPosition = FormStartPosition.CenterParent; FormBorderStyle = FormBorderStyle.Sizable;
         MinimumSize = new Size(720, 720); ClientSize = new Size(820, 850); AutoScaleMode = AutoScaleMode.Dpi;
         ShowInTaskbar = false; BackColor = Color.FromArgb(246, 248, 252); Font = new Font("Microsoft JhengHei UI", 10F);
 
-        foreach (var item in FontFamily.Families.OrderBy(value => value.Name, StringComparer.CurrentCultureIgnoreCase)) _family.Items.Add(item.Name);
+        foreach (var item in FontFamily.Families.Select(value => new FontChoice(value.Name, SupportsChinese(value.Name))).OrderByDescending(value => value.SupportsChinese).ThenBy(value => value.Name, StringComparer.CurrentCultureIgnoreCase)) _family.Items.Add(item);
         _family.DrawItem += DrawFontItem;
-        _weight.Items.AddRange(["一般", "粗體"]); _alignment.Items.AddRange(["靠左", "置中", "靠右"]); _distribution.Items.AddRange(["集中排列", "平均分散填滿"]);
         _systemColor.Checked = style.FollowThemeColor;
-        _family.SelectedItem = _family.Items.Cast<string>().FirstOrDefault(value => value.Equals(style.FontFamily, StringComparison.OrdinalIgnoreCase));
-        if (_family.SelectedIndex < 0 && _family.Items.Count > 0) _family.SelectedItem = "Microsoft JhengHei UI";
+        _gradient.Checked = style.GradientEnabled;
+        _family.SelectedItem = _family.Items.Cast<FontChoice>().FirstOrDefault(value => value.Name.Equals(style.FontFamily, StringComparison.OrdinalIgnoreCase));
+        if (_family.SelectedIndex < 0 && _family.Items.Count > 0) _family.SelectedItem = _family.Items.Cast<FontChoice>().FirstOrDefault(value => value.Name == "Microsoft JhengHei UI");
         if (_family.SelectedIndex < 0 && _family.Items.Count > 0) _family.SelectedIndex = 0;
-        _weight.SelectedIndex = style.Bold ? 1 : 0; _alignment.SelectedIndex = (int)style.TextAlignment; _distribution.SelectedIndex = (int)style.Distribution;
+        _weight.Value = style.Bold ? FontStyle.Bold : FontStyle.Regular; _alignment.Value = style.TextAlignment; _distribution.Value = style.Distribution; _gradientDirection.Value = style.GradientDirection;
+        UpdateWeightButtons();
 
-        var table = new TableLayoutPanel { Dock = DockStyle.Fill, AutoScroll = true, Padding = new Padding(22), ColumnCount = 2, RowCount = 13 };
+        var table = new TableLayoutPanel { Dock = DockStyle.Fill, AutoScroll = true, Padding = new Padding(22), ColumnCount = 2, RowCount = 18 };
         table.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 210)); table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        for (var i = 0; i < 12; i++) table.RowStyles.Add(new RowStyle(SizeType.AutoSize)); table.RowStyles.Add(new RowStyle(SizeType.Absolute, 140));
+        for (var i = 0; i < 17; i++) table.RowStyles.Add(new RowStyle(SizeType.AutoSize)); table.RowStyles.Add(new RowStyle(SizeType.Absolute, 200));
         AddRow(table, 0, "背景顏色", _color); AddRow(table, 1, "系統顏色", _systemColor); AddRow(table, 2, "透明度", _opacity);
-        var clear = new Button { Text = "恢復完全透明", AutoSize = true }; clear.Click += (_, _) => _opacity.Value = 0; AddRow(table, 3, "背景重設", clear);
+        AddRow(table, 3, "漸層", _gradient); AddRow(table, 4, "漸層顏色", _gradientColor); AddRow(table, 5, "漸層過渡", _gradientTransition); AddRow(table, 6, "漸層方向", _gradientDirection);
+        var clear = new Button { Text = "恢復完全透明", AutoSize = true }; clear.Click += (_, _) => _opacity.Value = 0; AddRow(table, 7, "背景重設", clear);
         var fontPanel = new TableLayoutPanel { Dock = DockStyle.Fill, AutoSize = true, ColumnCount = 2 };
         fontPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize)); fontPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        var resetFont = new Button { Text = "預設", AutoSize = true, Margin = new Padding(0, 0, 8, 0) }; resetFont.Click += (_, _) => _family.SelectedItem = "Microsoft JhengHei UI";
-        fontPanel.Controls.Add(resetFont, 0, 0); fontPanel.Controls.Add(_family, 1, 0); AddRow(table, 4, "字型", fontPanel);
-        AddRow(table, 5, "字體大小", _fontSize); AddRow(table, 6, "字體粗細", _weight); AddRow(table, 7, "行高", _lineHeight);
-        AddRow(table, 8, "行距／項目間距", _lineSpacing); AddRow(table, 9, "圓角大小（0 為直角）", _radius);
-        AddRow(table, 10, "文字對齊", _alignment); AddRow(table, 11, "內容排列", _distribution);
-        table.Controls.Add(_preview, 0, 12); table.SetColumnSpan(_preview, 2);
+        var resetFont = new Button { Text = "預設", AutoSize = true, Margin = new Padding(0, 0, 8, 0) }; resetFont.Click += (_, _) => _family.SelectedItem = _family.Items.Cast<FontChoice>().FirstOrDefault(value => value.Name == "Microsoft JhengHei UI");
+        fontPanel.Controls.Add(resetFont, 0, 0); fontPanel.Controls.Add(_family, 1, 0); AddRow(table, 8, "字型", fontPanel);
+        AddRow(table, 9, "字體顏色", _textColor); AddRow(table, 10, "字體大小", _fontSize); AddRow(table, 11, "字體粗細", _weight); AddRow(table, 12, "行高", _lineHeight);
+        AddRow(table, 13, "行距／項目間距", _lineSpacing); AddRow(table, 14, "圓角大小（0 為直角）", _radius);
+        AddRow(table, 15, "文字對齊", _alignment); AddRow(table, 16, "內容排列", _distribution);
+        table.Controls.Add(_preview, 0, 17); table.SetColumnSpan(_preview, 2);
 
         var buttons = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 62, FlowDirection = FlowDirection.RightToLeft, Padding = new Padding(10) };
         var cancel = new Button { Text = "取消", DialogResult = DialogResult.Cancel, Size = new Size(100, 38) };
         var ok = new Button { Text = "確定", DialogResult = DialogResult.OK, Size = new Size(100, 38) };
         buttons.Controls.AddRange([cancel, ok]); Controls.Add(table); Controls.Add(buttons); CancelButton = cancel;
-        _color.Click += (_, _) => ChooseColor(); _systemColor.CheckedChanged += (_, _) => UpdatePreview();
-        foreach (var slider in new[] { _opacity, _fontSize, _lineHeight, _lineSpacing, _radius }) slider.ValueChanged += (_, _) => UpdatePreview();
-        foreach (var combo in new[] { _family, _weight, _alignment, _distribution }) combo.SelectedIndexChanged += (_, _) => UpdatePreview();
+        _color.Click += (_, _) => ChooseColor(ref _selectedColor, _color, disableSystemColor: true); _gradientColor.Click += (_, _) => ChooseColor(ref _selectedGradientColor, _gradientColor); _textColor.Click += (_, _) => ChooseColor(ref _selectedTextColor, _textColor);
+        _systemColor.CheckedChanged += (_, _) => UpdatePreview(); _gradient.CheckedChanged += (_, _) => UpdatePreview();
+        foreach (var slider in new[] { _opacity, _gradientTransition, _fontSize, _lineHeight, _lineSpacing, _radius }) slider.ValueChanged += (_, _) => UpdatePreview();
+        _family.SelectedIndexChanged += (_, _) => { UpdateWeightButtons(); UpdatePreview(); };
+        _weight.ValueChanged += (_, _) => UpdatePreview(); _alignment.ValueChanged += (_, _) => UpdatePreview();
+        _distribution.ValueChanged += (_, _) => UpdatePreview(); _gradientDirection.ValueChanged += (_, _) => UpdatePreview();
         _preview.Paint += DrawPreview; UpdatePreview();
+        Shown += (_, _) => { if (Environment.GetEnvironmentVariable("DESKTOP_LIST_QA_SCROLL_PREVIEW") == "1") table.ScrollControlIntoView(_preview); };
     }
 
     public OverlayStyleOptions SelectedStyle => new()
     {
         BackgroundColor = _systemColor.Checked ? OverlayAppearanceSettings.GetWindowsThemeColor() : _selectedColor,
         BackgroundOpacity = (byte)Math.Round(_opacity.Value / 100M * 255M), FollowThemeColor = _systemColor.Checked,
-        FontFamily = _family.SelectedItem as string ?? "Microsoft JhengHei UI", FontSize = (float)_fontSize.Value, Bold = _weight.SelectedIndex == 1,
+        GradientEnabled = _gradient.Checked, GradientColor = _selectedGradientColor, GradientTransition = (int)_gradientTransition.Value, GradientDirection = _gradientDirection.Value,
+        TextColor = _selectedTextColor, FontFamily = (_family.SelectedItem as FontChoice)?.Name ?? "Microsoft JhengHei UI", FontSize = (float)_fontSize.Value, Bold = _weight.Value == FontStyle.Bold,
         LineHeight = (int)_lineHeight.Value, LineSpacing = (int)_lineSpacing.Value, CornerRadius = (int)_radius.Value,
-        TextAlignment = (OverlayTextAlignment)Math.Max(0, _alignment.SelectedIndex), Distribution = (OverlayContentDistribution)Math.Max(0, _distribution.SelectedIndex)
+        TextAlignment = _alignment.Value, Distribution = _distribution.Value
     };
 
     private static void AddRow(TableLayoutPanel table, int row, string title, Control control)
@@ -159,37 +220,53 @@ internal sealed class OverlayStyleDialog : Form
         table.Controls.Add(new Label { Text = title, AutoSize = true, Anchor = AnchorStyles.Left, Margin = new Padding(3, 12, 12, 12) }, 0, row);
         control.Margin = new Padding(3, 6, 3, 6); table.Controls.Add(control, 1, row);
     }
-    private void ChooseColor()
+    private void ChooseColor(ref Color target, Button button, bool disableSystemColor = false)
     {
-        using var picker = new ColorDialog { Color = _selectedColor, FullOpen = true };
+        using var picker = new ColorDialog { Color = target, FullOpen = true };
         if (picker.ShowDialog(this) != DialogResult.OK) return;
-        _selectedColor = picker.Color; _systemColor.Checked = false; UpdatePreview();
+        target = picker.Color; if (disableSystemColor) _systemColor.Checked = false; UpdatePreview();
     }
     private void UpdatePreview()
     {
-        _color.Enabled = !_systemColor.Checked; _color.BackColor = _selectedColor; _color.ForeColor = _selectedColor.GetBrightness() < .5F ? Color.White : Color.Black;
+        _color.Enabled = !_systemColor.Checked; SetColorButton(_color, _selectedColor); SetColorButton(_gradientColor, _selectedGradientColor); SetColorButton(_textColor, _selectedTextColor);
+        _gradientColor.Enabled = _gradient.Checked; _gradientTransition.Enabled = _gradient.Checked; _gradientDirection.Enabled = _gradient.Checked;
         _preview.Invalidate(); PreviewChanged?.Invoke(this, EventArgs.Empty);
     }
     private void DrawPreview(object? sender, PaintEventArgs e)
     {
         e.Graphics.Clear(_preview.BackColor); e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
         var style = SelectedStyle; var bounds = Rectangle.Inflate(_preview.ClientRectangle, -4, -4);
-        using var background = new SolidBrush(Color.FromArgb(Math.Max(1, (int)style.BackgroundOpacity), style.BackgroundColor));
+        using var background = OverlayStyleRendering.CreateBackgroundBrush(bounds, style, style.BackgroundColor);
         if (style.CornerRadius > 0) e.Graphics.FillRoundedRectangle(background, bounds, Math.Min(style.CornerRadius, Math.Min(bounds.Width, bounds.Height) / 2)); else e.Graphics.FillRectangle(background, bounds);
-        using var font = CreateFont(style); using var brush = new SolidBrush(Color.White);
+        using var font = CreateFont(style); using var brush = new SolidBrush(style.TextColor);
         using var format = new StringFormat { Alignment = style.TextAlignment switch { OverlayTextAlignment.Center => StringAlignment.Center, OverlayTextAlignment.Right => StringAlignment.Far, _ => StringAlignment.Near } };
-        var inset = Math.Max(16, style.CornerRadius); var textBounds = RectangleF.FromLTRB(bounds.Left + inset, bounds.Top + 10, bounds.Right - inset, bounds.Bottom - 8);
-        e.Graphics.DrawString("樣式即時預覽  Aa  中文\n第二行文字與行距", font, brush, textBounds, format);
+        var inset = Math.Max(16, style.CornerRadius); var textBounds = RectangleF.FromLTRB(bounds.Left + inset, bounds.Top + 12, bounds.Right - inset, bounds.Bottom - 12);
+        var firstY = textBounds.Top; var secondY = Math.Min(textBounds.Bottom - font.Height, firstY + Math.Max(style.LineHeight, font.Height) + style.LineSpacing);
+        e.Graphics.DrawString("樣式即時預覽  Aa  中文", font, brush, new RectangleF(textBounds.X, firstY, textBounds.Width, font.Height + 8), format);
+        e.Graphics.DrawString("第二行文字與行距", font, brush, new RectangleF(textBounds.X, secondY, textBounds.Width, font.Height + 8), format);
     }
     private void DrawFontItem(object? sender, DrawItemEventArgs e)
     {
         e.DrawBackground(); if (e.Index < 0 || e.Index >= _family.Items.Count) return;
-        var name = _family.Items[e.Index] as string ?? "Microsoft JhengHei UI"; var supported = SupportsChinese(name);
+        var choice = _family.Items[e.Index] as FontChoice ?? new FontChoice("Microsoft JhengHei UI", true); var name = choice.Name; var supported = choice.SupportsChinese;
         using var nameFont = CreateFont(new OverlayStyleOptions { FontFamily = name, FontSize = 10F }); using var warningFont = new Font(Font.FontFamily, 9F);
         using var brush = new SolidBrush((e.State & DrawItemState.Selected) != 0 ? SystemColors.HighlightText : ForeColor);
         e.Graphics.DrawString(name, nameFont, brush, e.Bounds.X + 3, e.Bounds.Y + 3);
         if (!supported) { var width = e.Graphics.MeasureString(name, nameFont).Width; e.Graphics.DrawString("（不支援中文）", warningFont, brush, e.Bounds.X + 5 + width, e.Bounds.Y + 4); }
         e.DrawFocusRectangle();
+    }
+    private static void SetColorButton(Button button, Color color) { button.BackColor = color; button.ForeColor = color.GetBrightness() < .5F ? Color.White : Color.Black; }
+    private void UpdateWeightButtons()
+    {
+        var family = (_family.SelectedItem as FontChoice)?.Name ?? "Microsoft JhengHei UI";
+        try
+        {
+            using var value = new FontFamily(family); var regular = value.IsStyleAvailable(FontStyle.Regular); var bold = value.IsStyleAvailable(FontStyle.Bold);
+            _weight.SetVisible(FontStyle.Regular, regular); _weight.SetVisible(FontStyle.Bold, bold);
+            if (_weight.Value == FontStyle.Bold && !bold) _weight.Value = FontStyle.Regular;
+            if (_weight.Value == FontStyle.Regular && !regular && bold) _weight.Value = FontStyle.Bold;
+        }
+        catch { _weight.SetVisible(FontStyle.Regular, true); _weight.SetVisible(FontStyle.Bold, false); _weight.Value = FontStyle.Regular; }
     }
     internal static bool SupportsChinese(string family)
     {
@@ -212,6 +289,22 @@ internal sealed class OverlayStyleDialog : Form
     [DllImport("gdi32.dll")] private static extern bool DeleteObject(IntPtr value);
 }
 
+internal static class OverlayStyleRendering
+{
+    public static Brush CreateBackgroundBrush(Rectangle bounds, OverlayStyleOptions style, Color primary)
+    {
+        var alpha = Math.Max(1, (int)style.BackgroundOpacity);
+        var first = Color.FromArgb(alpha, primary); var second = Color.FromArgb(alpha, style.GradientColor);
+        if (!style.GradientEnabled || bounds.Width <= 1 || bounds.Height <= 1) return new SolidBrush(first);
+        var angle = style.GradientDirection switch { OverlayGradientDirection.TopToBottom => 90F, OverlayGradientDirection.DiagonalDown => 45F, OverlayGradientDirection.DiagonalUp => 315F, _ => 0F };
+        var brush = new LinearGradientBrush(bounds, first, second, angle);
+        var position = Math.Clamp(style.GradientTransition / 100F, .02F, .98F);
+        brush.InterpolationColors = new ColorBlend { Colors = [first, Blend(first, second, .5F), second], Positions = [0F, position, 1F] };
+        return brush;
+    }
+    private static Color Blend(Color first, Color second, float amount) => Color.FromArgb((int)(first.A + (second.A - first.A) * amount), (int)(first.R + (second.R - first.R) * amount), (int)(first.G + (second.G - first.G) * amount), (int)(first.B + (second.B - first.B) * amount));
+}
+
 internal static class OverlayAppearanceSettings
 {
     public static OverlayStyleOptions LoadStyle(string? identity, OverlayStyleOptions fallback)
@@ -223,6 +316,11 @@ internal static class OverlayAppearanceSettings
             if (key.GetValue("BackgroundColor") is int rgb) result.BackgroundColor = Color.FromArgb((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255);
             if (key.GetValue("BackgroundOpacity") is int opacity) result.BackgroundOpacity = (byte)Math.Clamp(opacity, 0, 255);
             if (key.GetValue("FollowThemeColor") is int follow) result.FollowThemeColor = follow != 0;
+            if (key.GetValue("GradientEnabled") is int gradient) result.GradientEnabled = gradient != 0;
+            if (key.GetValue("GradientColor") is int gradientRgb) result.GradientColor = Color.FromArgb((gradientRgb >> 16) & 255, (gradientRgb >> 8) & 255, gradientRgb & 255);
+            if (key.GetValue("GradientTransition") is int transition) result.GradientTransition = Math.Clamp(transition, 0, 100);
+            if (key.GetValue("GradientDirection") is int direction && Enum.IsDefined(typeof(OverlayGradientDirection), direction)) result.GradientDirection = (OverlayGradientDirection)direction;
+            if (key.GetValue("TextColor") is int textRgb) result.TextColor = Color.FromArgb((textRgb >> 16) & 255, (textRgb >> 8) & 255, textRgb & 255);
             if (key.GetValue("FontFamily") is string family && family.Length > 0) result.FontFamily = family;
             if (key.GetValue("FontSizeX10") is int size) result.FontSize = Math.Clamp(size / 10F, 6F, 48F);
             if (key.GetValue("FontBold") is int bold) result.Bold = bold != 0;
@@ -243,6 +341,10 @@ internal static class OverlayAppearanceSettings
             using var key = Registry.CurrentUser.CreateSubKey(OverlaySettings.GetSettingsKey(identity)); var color = style.BackgroundColor;
             key.SetValue("BackgroundColor", (color.R << 16) | (color.G << 8) | color.B, RegistryValueKind.DWord);
             key.SetValue("BackgroundOpacity", style.BackgroundOpacity, RegistryValueKind.DWord); key.SetValue("FollowThemeColor", style.FollowThemeColor ? 1 : 0, RegistryValueKind.DWord);
+            var gradient = style.GradientColor; var text = style.TextColor;
+            key.SetValue("GradientEnabled", style.GradientEnabled ? 1 : 0, RegistryValueKind.DWord); key.SetValue("GradientColor", (gradient.R << 16) | (gradient.G << 8) | gradient.B, RegistryValueKind.DWord);
+            key.SetValue("GradientTransition", style.GradientTransition, RegistryValueKind.DWord); key.SetValue("GradientDirection", (int)style.GradientDirection, RegistryValueKind.DWord);
+            key.SetValue("TextColor", (text.R << 16) | (text.G << 8) | text.B, RegistryValueKind.DWord);
             key.SetValue("FontFamily", style.FontFamily, RegistryValueKind.String); key.SetValue("FontSizeX10", (int)Math.Round(style.FontSize * 10), RegistryValueKind.DWord);
             key.SetValue("FontBold", style.Bold ? 1 : 0, RegistryValueKind.DWord); key.SetValue("LineHeight", style.LineHeight, RegistryValueKind.DWord);
             key.SetValue("LineSpacing", style.LineSpacing, RegistryValueKind.DWord); key.SetValue("CornerRadius", style.CornerRadius, RegistryValueKind.DWord);

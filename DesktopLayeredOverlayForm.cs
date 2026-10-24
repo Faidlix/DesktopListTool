@@ -58,6 +58,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
     public string? FolderPath => _folderPath;
     public bool IsCustomList => _customList is not null;
     public bool IsFloating => _isFloating;
+    internal IReadOnlyList<string> ContextMenuLabels => _menu?.Items.Cast<ToolStripItem>().Select(value => value.Text ?? "").ToArray() ?? [];
     internal Func<DesktopLayeredOverlayForm, Rectangle, Rectangle>? ResolvePlacement;
     private string? SettingsIdentity => _customList is null ? _folderPath : $"custom:{_customList.Id:N}";
 
@@ -421,8 +422,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
             graphics.Clear(Color.Transparent);
             graphics.SmoothingMode = SmoothingMode.AntiAlias;
             graphics.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
-            var effectiveAlpha = Math.Max(1, (int)_backgroundOpacity);
-            using var hitTargetBrush = new SolidBrush(Color.FromArgb(effectiveAlpha, _backgroundColor));
+            using var hitTargetBrush = OverlayStyleRendering.CreateBackgroundBrush(ClientRectangle, _style, _backgroundColor);
             if (_style.CornerRadius > 0)
                 graphics.FillRoundedRectangle(hitTargetBrush, ClientRectangle, Math.Min(_style.CornerRadius, Math.Min(ClientSize.Width, ClientSize.Height) / 2));
             else
@@ -502,7 +502,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
         var textX = visualBounds.X + _iconSize + 14;
         var textY = visualBounds.Y + (visualBounds.Height - _itemFont.GetHeight(graphics)) / 2F;
         using var shadowBrush = new SolidBrush(Color.FromArgb(210, 0, 0, 0));
-        using var textBrush = new SolidBrush(Color.White);
+        using var textBrush = new SolidBrush(_style.TextColor);
         graphics.DrawString(entry.Name, _itemFont, shadowBrush, textX + 1, textY + 1);
         graphics.DrawString(entry.Name, _itemFont, textBrush, textX, textY);
         if (index == _dropFolderIndex)
@@ -577,6 +577,10 @@ internal sealed class DesktopLayeredOverlayForm : Form
         menu.Items.Add("反轉排序", null, (_, _) => { _sortAscending = !_sortAscending; SaveSortAndReload(); });
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("樣式…", null, (_, _) => EditStyle());
+        menu.Items.Add("複製樣式", null, (_, _) => OverlayStyleClipboard.Copy(_style));
+        var pasteStyle = new ToolStripMenuItem("貼上樣式");
+        pasteStyle.Click += (_, _) => { if (OverlayStyleClipboard.Paste() is { } style) ApplyStyle(style, save: true); };
+        menu.Items.Add(pasteStyle);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("新增資料夾清單…", null, (_, _) => AddFolderRequested?.Invoke(this, EventArgs.Empty));
         menu.Items.Add("新增便籤…", null, (_, _) => AddNoteRequested?.Invoke(this, new NoteRequestedEventArgs(_lastContextMenuScreenPoint)));
@@ -592,7 +596,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
         };
         menu.Items.Add(autoUpdate);
         menu.Items.Add("立即檢查更新", null, (_, _) => CheckUpdateRequested?.Invoke(this, EventArgs.Empty));
-        menu.Opening += (_, _) => autoUpdate.Checked = AutoUpdateManager.IsEnabled;
+        menu.Opening += (_, _) => { autoUpdate.Checked = AutoUpdateManager.IsEnabled; pasteStyle.Enabled = OverlayStyleClipboard.HasStyle; };
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("重新整理", null, (_, _) => ReloadItems());
         return menu;
@@ -786,7 +790,9 @@ internal sealed class DesktopLayeredOverlayForm : Form
         var client = PointToClient(new Point(e.X, e.Y));
         _lastDragClientPoint = client;
         var index = GetEntryIndexAt(client);
-        _dropFolderIndex = index >= 0 && _entries[index].IsDirectory && !_entries[index].IsVirtual && IsFolderDropZone(client, index) ? index : -1;
+        var sourcePath = e.Data.GetData("DesktopListTool.SourcePath") as string;
+        _dropFolderIndex = index >= 0 && _entries[index].IsDirectory && !_entries[index].IsVirtual &&
+            !string.Equals(sourcePath, _entries[index].Path, StringComparison.OrdinalIgnoreCase) && IsFolderDropZone(client, index) ? index : -1;
         _dropInsertIndex = _dropFolderIndex >= 0 ? -1 : GetInsertionIndex(client);
         _dropIsCopy = (e.KeyState & 8) != 0;
         e.Effect = _dropIsCopy ? DragDropEffects.Copy : DragDropEffects.Move;
@@ -796,8 +802,11 @@ internal sealed class DesktopLayeredOverlayForm : Form
     private bool IsFolderDropZone(Point point, int index)
     {
         var bounds = GetEntryBounds(index);
-        return Rectangle.Inflate(bounds, -Math.Max(18, bounds.Width / 5), -4).Contains(point);
+        var folderZone = Rectangle.Inflate(bounds, 0, -Math.Max(4, bounds.Height / 5));
+        return IsFolderDropTarget(folderZone, point);
     }
+
+    internal static bool IsFolderDropTarget(Rectangle bounds, Point point) => bounds.Contains(point);
 
     private int GetInsertionIndex(Point point)
     {

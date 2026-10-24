@@ -32,6 +32,9 @@ internal sealed class DesktopLayeredNoteForm : Form
     private bool _scrollDragging;
     private int _scrollDragStartY;
     private int _scrollDragStartOffset;
+    private bool _movePending;
+    private Point _moveStart;
+    private int _lastDistributionExtra;
 
     public event EventHandler? EditRequested;
     public event EventHandler? DeleteRequested;
@@ -60,14 +63,19 @@ internal sealed class DesktopLayeredNoteForm : Form
         _menu.Items.Add("新增便籤…", null, (_, _) => AddNoteRequested?.Invoke(this, new NoteRequestedEventArgs(_lastContextScreenPoint)));
         _menu.Items.Add("編輯便籤內容", null, (_, _) => EditRequested?.Invoke(this, EventArgs.Empty));
         _menu.Items.Add("樣式…", null, (_, _) => EditStyle());
+        _menu.Items.Add("複製樣式", null, (_, _) => OverlayStyleClipboard.Copy(_style));
+        var pasteStyle = new ToolStripMenuItem("貼上樣式");
+        pasteStyle.Click += (_, _) => { if (OverlayStyleClipboard.Paste() is { } style) ApplyStyle(style, true); };
+        _menu.Items.Add(pasteStyle);
         _floatingItem = new ToolStripMenuItem(_isFloating ? "回到桌面" : "變成懸浮視窗");
         _floatingItem.Click += (_, _) => { if (_isFloating) ReturnToDesktop(); else MakeFloating(); };
         _menu.Items.Add(_floatingItem);
         _menu.Items.Add(new ToolStripSeparator());
         _menu.Items.Add("刪除便籤", null, (_, _) => DeleteRequested?.Invoke(this, EventArgs.Empty));
+        _menu.Opening += (_, _) => pasteStyle.Enabled = OverlayStyleClipboard.HasStyle;
 
         MouseMove += HandleMouseMove;
-        MouseUp += (_, _) => _scrollDragging = false;
+        MouseUp += (_, _) => { _scrollDragging = false; _movePending = false; };
         MouseWheel += HandleMouseWheel;
         MouseDown += HandleMouseDown;
         MouseDoubleClick += HandleMouseDoubleClick;
@@ -80,6 +88,8 @@ internal sealed class DesktopLayeredNoteForm : Form
     internal IReadOnlyList<string> ContextMenuLabels => _menu.Items.Cast<ToolStripItem>().Select(value => value.Text ?? "").ToArray();
     internal bool HasScrollableContent => _contentHeight > SafeContentBounds.Height;
     internal int ScrollOffset => _scrollOffset;
+    internal int LastDistributionExtra => _lastDistributionExtra;
+    internal void RenderForTest() { _ = Handle; RenderLayer(); }
     internal void ScrollForTest(int delta)
     {
         _scrollOffset += delta; ClampScroll(); RenderLayer();
@@ -160,13 +170,17 @@ internal sealed class DesktopLayeredNoteForm : Form
             NoteChanged?.Invoke(this, EventArgs.Empty);
             return;
         }
-        ReleaseCapture();
-        SendMessage(Handle, 0x00A1, (IntPtr)2, IntPtr.Zero);
+        _movePending = true;
+        _moveStart = e.Location;
     }
 
     private void HandleMouseMove(object? sender, MouseEventArgs e)
     {
         RevealFrame();
+        if (_movePending && e.Button == MouseButtons.Left && Math.Abs(e.X - _moveStart.X) + Math.Abs(e.Y - _moveStart.Y) >= SystemInformation.DragSize.Width / 2)
+        {
+            _movePending = false; ReleaseCapture(); SendMessage(Handle, 0x00A1, (IntPtr)2, IntPtr.Zero); return;
+        }
         if (!_scrollDragging) return;
         var track = ScrollbarTrackBounds;
         var thumb = ScrollbarThumbBounds;
@@ -187,6 +201,7 @@ internal sealed class DesktopLayeredNoteForm : Form
     {
         if (e.Button != MouseButtons.Left || FloatingReturnButtonBounds.Contains(e.Location) || ScrollbarThumbBounds.Contains(e.Location) ||
             _checkBounds.Any(value => value.Bounds.Contains(e.Location)) || (e.X >= ClientSize.Width - 18 && e.Y >= ClientSize.Height - 18)) return;
+        _movePending = false;
         EditRequested?.Invoke(this, EventArgs.Empty);
     }
 
@@ -200,7 +215,7 @@ internal sealed class DesktopLayeredNoteForm : Form
             graphics.Clear(Color.Transparent);
             graphics.SmoothingMode = SmoothingMode.AntiAlias;
             graphics.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
-            using var background = new SolidBrush(Color.FromArgb(Math.Max(1, (int)_backgroundOpacity), _backgroundColor));
+            using var background = OverlayStyleRendering.CreateBackgroundBrush(ClientRectangle, _style, _backgroundColor);
             if (_style.CornerRadius > 0)
                 graphics.FillRoundedRectangle(background, ClientRectangle, Math.Min(_style.CornerRadius, Math.Min(ClientSize.Width, ClientSize.Height) / 2));
             else graphics.FillRectangle(background, ClientRectangle);
@@ -246,24 +261,30 @@ internal sealed class DesktopLayeredNoteForm : Form
         var width = Math.Max(1, safe.Width);
         var y = safe.Top - _scrollOffset;
         var itemStep = Math.Max(_style.LineHeight, (int)Math.Ceiling(_font.GetHeight(graphics)) + 6) + _style.LineSpacing;
+        var (bodyRows, bodyHeight) = MeasureMarkdownLayout(graphics, _data.Text, width);
+        var totalRows = bodyRows + _data.Items.Count;
+        var naturalHeight = bodyHeight + (_data.Text.Length > 0 ? 10 : 0) + _data.Items.Count * itemStep;
+        var distributionExtra = _style.Distribution == OverlayContentDistribution.Fill && totalRows > 1 && naturalHeight < safe.Height
+            ? (safe.Height - naturalHeight) / totalRows : 0;
+        _lastDistributionExtra = distributionExtra;
         if (!string.IsNullOrWhiteSpace(_data.Text))
         {
-            using var textBrush = new SolidBrush(Color.White);
+            using var textBrush = new SolidBrush(_style.TextColor);
             using var shadowBrush = new SolidBrush(Color.FromArgb(210, 0, 0, 0));
-            y = DrawMarkdownText(graphics, _data.Text, safe.Left, y, width, shadowBrush, textBrush) + 10;
+            y = DrawMarkdownText(graphics, _data.Text, safe.Left, y, width, distributionExtra, shadowBrush, textBrush) + 10;
         }
         foreach (var item in _data.Items.OrderBy(value => value.Completed))
         {
             var row = new Rectangle(safe.Left, y, width, itemStep);
             var box = new Rectangle(row.X + 2, row.Y + 6, 17, 17);
-            using var boxPen = new Pen(Color.White, 1.8F);
+            using var boxPen = new Pen(_style.TextColor, 1.8F);
             graphics.DrawRectangle(boxPen, box);
             if (item.Completed)
             {
                 using var checkPen = new Pen(Color.FromArgb(115, 205, 255), 2.2F);
                 graphics.DrawLines(checkPen, [new Point(box.Left + 3, box.Top + 9), new Point(box.Left + 7, box.Bottom - 3), new Point(box.Right - 2, box.Top + 3)]);
             }
-            using var textBrush = new SolidBrush(Color.White);
+            using var textBrush = new SolidBrush(_style.TextColor);
             using var shadowBrush = new SolidBrush(Color.FromArgb(210, 0, 0, 0));
             var font = item.Completed ? _completedFont : _font;
             var itemBounds = new RectangleF(row.X + 26, row.Y + 3, Math.Max(1, row.Width - 28), row.Height);
@@ -271,14 +292,14 @@ internal sealed class DesktopLayeredNoteForm : Form
             graphics.DrawString(item.Text, font, shadowBrush, new RectangleF(itemBounds.X + 1, itemBounds.Y + 1, itemBounds.Width, itemBounds.Height), format);
             graphics.DrawString(item.Text, font, textBrush, itemBounds, format);
             _checkBounds.Add((item, row));
-            y += itemStep;
+            y += itemStep + distributionExtra;
         }
         _contentHeight = Math.Max(safe.Height, y + _scrollOffset - safe.Top);
         graphics.Restore(originalState);
         ClampScroll();
     }
 
-    private int DrawMarkdownText(Graphics graphics, string text, int x, int y, int width, Brush shadow, Brush foreground)
+    private int DrawMarkdownText(Graphics graphics, string text, int x, int y, int width, int distributionExtra, Brush shadow, Brush foreground)
     {
         var currentY = y;
         var sourceLines = text.Replace("\r", "").Split('\n');
@@ -290,27 +311,42 @@ internal sealed class DesktopLayeredNoteForm : Form
             var step = Math.Max(_style.LineHeight, (int)Math.Ceiling(lineFont.GetHeight(graphics)) + 4) + _style.LineSpacing;
             naturalSteps.Add(step);
         }
-        var totalNatural = naturalSteps.Sum();
-        var fillExtra = _style.Distribution == OverlayContentDistribution.Fill && sourceLines.Length > 1
-            ? Math.Max(0, (SafeContentBounds.Height - totalNatural - _data.Items.Count * Math.Max(_style.LineHeight, (int)Math.Ceiling(_font.GetHeight(graphics)) + 6)) / (sourceLines.Length - 1)) : 0;
         for (var lineIndex = 0; lineIndex < sourceLines.Length; lineIndex++)
         {
             var parsed = MarkdownNoteRenderer.ParseLine(sourceLines[lineIndex]);
-            var runs = new List<MarkdownRun>();
-            if (parsed.Checked is bool check) runs.Add(new MarkdownRun(check ? "☑ " : "☐ ", check ? FontStyle.Strikeout : FontStyle.Regular));
-            else if (parsed.Prefix.Length > 0) runs.Add(new MarkdownRun(parsed.Prefix, FontStyle.Regular));
-            runs.AddRange(parsed.Runs);
+            var runs = BuildRuns(parsed);
             using var baseFont = CreateMarkdownFont(parsed.HeadingLevel, FontStyle.Regular);
             var lines = WrapRuns(graphics, runs, baseFont, width);
             foreach (var line in lines)
             {
                 DrawRunLine(graphics, line, parsed.HeadingLevel, x, currentY, width, shadow, foreground);
-                currentY += naturalSteps[lineIndex];
+                currentY += naturalSteps[lineIndex] + distributionExtra;
             }
-            if (lines.Count == 0) currentY += naturalSteps[lineIndex];
-            currentY += fillExtra;
+            if (lines.Count == 0) currentY += naturalSteps[lineIndex] + distributionExtra;
         }
         return currentY;
+    }
+
+    private (int Rows, int Height) MeasureMarkdownLayout(Graphics graphics, string text, int width)
+    {
+        if (string.IsNullOrWhiteSpace(text)) return (0, 0);
+        var rows = 0; var height = 0;
+        foreach (var source in text.Replace("\r", "").Split('\n'))
+        {
+            var parsed = MarkdownNoteRenderer.ParseLine(source); using var font = CreateMarkdownFont(parsed.HeadingLevel, FontStyle.Regular);
+            var count = Math.Max(1, WrapRuns(graphics, BuildRuns(parsed), font, width).Count);
+            var step = Math.Max(_style.LineHeight, (int)Math.Ceiling(font.GetHeight(graphics)) + 4) + _style.LineSpacing;
+            rows += count; height += count * step;
+        }
+        return (rows, height);
+    }
+
+    private static List<MarkdownRun> BuildRuns(MarkdownLine parsed)
+    {
+        var runs = new List<MarkdownRun>();
+        if (parsed.Checked is bool check) runs.Add(new MarkdownRun(check ? "☑ " : "☐ ", check ? FontStyle.Strikeout : FontStyle.Regular));
+        else if (parsed.Prefix.Length > 0) runs.Add(new MarkdownRun(parsed.Prefix, FontStyle.Regular));
+        runs.AddRange(parsed.Runs); return runs;
     }
 
     private List<List<MarkdownRun>> WrapRuns(Graphics graphics, IReadOnlyList<MarkdownRun> runs, Font baseFont, int width)
@@ -416,6 +452,11 @@ internal sealed class DesktopLayeredNoteForm : Form
             _data.BackgroundColorArgb = _backgroundColor.ToArgb();
             _data.BackgroundOpacity = _style.BackgroundOpacity;
             _data.FollowThemeColor = _style.FollowThemeColor;
+            _data.GradientEnabled = _style.GradientEnabled;
+            _data.GradientColorArgb = _style.GradientColor.ToArgb();
+            _data.GradientTransition = _style.GradientTransition;
+            _data.GradientDirection = _style.GradientDirection;
+            _data.TextColorArgb = _style.TextColor.ToArgb();
             _data.FontFamily = _style.FontFamily;
             _data.FontSize = _style.FontSize;
             _data.FontBold = _style.Bold;
@@ -527,6 +568,11 @@ internal sealed class DesktopLayeredNoteForm : Form
         BackgroundColor = Color.FromArgb(data.BackgroundColorArgb),
         BackgroundOpacity = data.BackgroundOpacity,
         FollowThemeColor = data.FollowThemeColor,
+        GradientEnabled = data.GradientEnabled,
+        GradientColor = Color.FromArgb(data.GradientColorArgb),
+        GradientTransition = data.GradientTransition,
+        GradientDirection = data.GradientDirection,
+        TextColor = Color.FromArgb(data.TextColorArgb),
         FontFamily = data.FontFamily,
         FontSize = data.FontSize,
         Bold = data.FontBold,

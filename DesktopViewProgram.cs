@@ -1141,7 +1141,10 @@ internal static class SmokeTests
             using (var recycleIcon = DesktopOverlayEntry.GetIcon(DesktopOverlayEntry.RecycleBinPath, true))
                 Assert(recycleIcon is not null, "recycle bin icon available");
             using (var overlayConstruction = new DesktopLayeredOverlayForm(ListItemSize.Standard))
+            {
                 Assert(overlayConstruction.Width >= overlayConstruction.MinimumSize.Width, "overlay constructs before resize callbacks");
+                Assert(overlayConstruction.ContextMenuLabels.Contains("複製樣式") && overlayConstruction.ContextMenuLabels.Contains("貼上樣式"), "list menu exposes style copy and paste");
+            }
 
             var referenceRoot = Path.Combine(Path.GetTempPath(), $"DesktopListTool-Reference-{Guid.NewGuid():N}");
             Directory.CreateDirectory(referenceRoot);
@@ -1157,6 +1160,11 @@ internal static class SmokeTests
                 BackgroundColor = Color.Black,
                 BackgroundOpacity = 80,
                 FollowThemeColor = false,
+                GradientEnabled = true,
+                GradientColor = Color.DarkOrange,
+                GradientTransition = 65,
+                GradientDirection = OverlayGradientDirection.DiagonalDown,
+                TextColor = Color.LightYellow,
                 FontSize = 12,
                 Bold = true,
                 LineHeight = 38,
@@ -1166,13 +1174,23 @@ internal static class SmokeTests
                 Distribution = OverlayContentDistribution.Fill
             }, "清單"))
             {
-                var themeOption = appearance.Controls.Cast<Control>().SelectMany(Descendants).OfType<CheckBox>().Single();
+                var controls = appearance.Controls.Cast<Control>().SelectMany(Descendants).ToArray();
+                var themeOption = controls.OfType<CheckBox>().Single(value => value.Text.Contains("Windows 系統顏色"));
                 Assert(themeOption.Text.Contains("Windows 系統顏色"), "system color option is visible");
                 Assert(appearance.SelectedStyle.Bold && appearance.SelectedStyle.CornerRadius == 18 &&
-                    appearance.SelectedStyle.TextAlignment == OverlayTextAlignment.Center && appearance.SelectedStyle.Distribution == OverlayContentDistribution.Fill,
+                    appearance.SelectedStyle.TextAlignment == OverlayTextAlignment.Center && appearance.SelectedStyle.Distribution == OverlayContentDistribution.Fill &&
+                    appearance.SelectedStyle.GradientEnabled && appearance.SelectedStyle.GradientDirection == OverlayGradientDirection.DiagonalDown && appearance.SelectedStyle.TextColor == Color.LightYellow,
                     "extended style values round trip");
                 Assert(appearance.AcceptButton is null, "style Enter does not confirm");
-                Assert(appearance.Controls.Cast<Control>().SelectMany(Descendants).OfType<SliderNumberControl>().Count() == 5, "all numeric style values use sliders");
+                Assert(controls.OfType<SliderNumberControl>().Count() == 6, "all numeric style values use sliders");
+                Assert(controls.OfType<ButtonChoice<OverlayTextAlignment>>().Any() && controls.OfType<ButtonChoice<OverlayContentDistribution>>().Any() && controls.OfType<ButtonChoice<FontStyle>>().Any(), "alignment distribution and weight use buttons");
+                var fontChoices = controls.OfType<ComboBox>().Single(value => value.DrawMode == DrawMode.OwnerDrawFixed).Items.Cast<FontChoice>().ToArray();
+                Assert(!fontChoices.SkipWhile(value => value.SupportsChinese).Any(value => value.SupportsChinese), "unsupported Chinese fonts are sorted last");
+                var fontCombo = controls.OfType<ComboBox>().Single(value => value.DrawMode == DrawMode.OwnerDrawFixed);
+                var weightButtons = controls.OfType<ButtonChoice<FontStyle>>().Single();
+                var noBold = FontFamily.Families.FirstOrDefault(value => value.IsStyleAvailable(FontStyle.Regular) && !value.IsStyleAvailable(FontStyle.Bold));
+                if (noBold is not null) { fontCombo.SelectedItem = fontChoices.First(value => value.Name == noBold.Name); Assert(!weightButtons.IsOptionVisible(FontStyle.Bold), "unsupported font weight button is hidden"); }
+                OverlayStyleClipboard.Copy(appearance.SelectedStyle); Assert(OverlayStyleClipboard.Paste()?.TextColor == Color.LightYellow, "style copy and paste preserves full style");
                 var appearanceQa = Environment.GetEnvironmentVariable("DESKTOP_LIST_QA_APPEARANCE_PATH");
                 if (!string.IsNullOrWhiteSpace(appearanceQa))
                 {
@@ -1200,6 +1218,7 @@ internal static class SmokeTests
                 Assert(File.Exists(Path.Combine(copyTarget, "drag.txt")) && File.Exists(file), "ctrl drag copies file");
                 DesktopLayeredOverlayForm.TransferPaths([file], moveTarget, copy: false);
                 Assert(File.Exists(Path.Combine(moveTarget, "drag.txt")) && !File.Exists(file), "drag moves file");
+                Assert(DesktopLayeredOverlayForm.IsFolderDropTarget(new Rectangle(10, 18, 300, 26), new Point(295, 30)), "folder row center accepts drop");
             }
             finally
             {
@@ -1210,7 +1229,9 @@ internal static class SmokeTests
             var note = new DesktopNoteData
             {
                 Text = "## 每週回顧\r\n**完成：** Markdown 顯示與安全圓角\r\n- 第一個項目\r\n- 第二個項目\r\n> 這是一段引言\r\n`inline code` 與 [連結](https://example.invalid)\r\n第七行用來確認內容超出時可捲動\r\n第八行仍需保留",
-                X = 40, Y = 40, Width = 420, Height = 180, CornerRadius = 42
+                X = 40, Y = 40, Width = 420, Height = 180, CornerRadius = 42,
+                GradientEnabled = true, GradientColorArgb = Color.DarkOrange.ToArgb(), GradientDirection = OverlayGradientDirection.DiagonalDown,
+                GradientTransition = 60, TextColorArgb = Color.LightYellow.ToArgb()
             };
             var markdown = MarkdownNoteRenderer.ParseLine("## **標題**與[連結](https://example.invalid)");
             Assert(markdown.HeadingLevel == 2 && markdown.Runs.Any(value => value.Style.HasFlag(FontStyle.Bold)) && markdown.Runs.Any(value => value.Style.HasFlag(FontStyle.Underline)), "Markdown formatting parses");
@@ -1230,7 +1251,7 @@ internal static class SmokeTests
             }
             using (var noteForm = new DesktopLayeredNoteForm(note))
             {
-                Assert(noteForm.ContextMenuLabels.Contains("新增便籤…") && noteForm.ContextMenuLabels.Contains("樣式…"), "note menu exposes new note and style");
+                Assert(noteForm.ContextMenuLabels.Contains("新增便籤…") && noteForm.ContextMenuLabels.Contains("樣式…") && noteForm.ContextMenuLabels.Contains("複製樣式") && noteForm.ContextMenuLabels.Contains("貼上樣式"), "note menu exposes note and style actions");
                 noteForm.ApplyEditedContent(note.Text,
                 [
                     new DesktopChecklistItem { Text = "已完成", Completed = true },
@@ -1242,6 +1263,12 @@ internal static class SmokeTests
                     noteForm.StartPosition = FormStartPosition.Manual; noteForm.Location = new Point(-10000, -10000); noteForm.Show(); Application.DoEvents();
                     Assert(noteForm.HasScrollableContent, "small note retains overflow content"); noteForm.ScrollForTest(120); Assert(noteForm.ScrollOffset > 0, "small note scrolls vertically"); noteForm.Hide();
                 }
+            }
+            var distributedNote = new DesktopNoteData { Text = "第一行\r\n第二行", X = 40, Y = 40, Width = 500, Height = 420, Distribution = OverlayContentDistribution.Fill };
+            using (var distributedForm = new DesktopLayeredNoteForm(distributedNote))
+            {
+                distributedForm.RenderForTest();
+                Assert(distributedForm.LastDistributionExtra > 0, "note fill distribution affects content spacing");
             }
 
             Console.WriteLine($"DESKTOP_VIEW_SMOKE_PASSED CURRENT={current}");
