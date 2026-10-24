@@ -93,6 +93,7 @@ internal sealed class DesktopViewApplicationContext : ApplicationContext
     private readonly RegisteredWaitHandle[] _registeredWaits;
 
     private readonly ToolStripMenuItem _startupItem;
+    private bool _checkingForUpdate;
 
     public DesktopViewApplicationContext(ListItemSize initialSize)
     {
@@ -148,6 +149,8 @@ internal sealed class DesktopViewApplicationContext : ApplicationContext
         foreach (var note in _notes)
             ShowNote(note);
         WriteQaLayoutIfRequested();
+        if (AutoUpdateManager.IsEnabled)
+            _overlay.BeginInvoke(async () => { await Task.Delay(2500); await CheckForUpdatesAsync(interactive: false); });
     }
 
     private void SetAllItemSizes(ListItemSize size)
@@ -272,6 +275,19 @@ internal sealed class DesktopViewApplicationContext : ApplicationContext
     {
         overlay.CreateCustomListRequested += (_, e) => CreateCustomList(e.Path, e.ScreenLocation);
         overlay.ResolvePlacement = (sender, candidate) => FindFreePlacement(candidate, sender);
+        overlay.CheckUpdateRequested += async (_, _) => await CheckForUpdatesAsync(interactive: true);
+    }
+
+    private async Task CheckForUpdatesAsync(bool interactive)
+    {
+        if (_checkingForUpdate || _overlay.IsDisposed) return;
+        _checkingForUpdate = true;
+        try
+        {
+            if (await AutoUpdateManager.CheckAndPromptAsync(_overlay, interactive))
+                ExitThread();
+        }
+        finally { _checkingForUpdate = false; }
     }
 
     private IEnumerable<DesktopLayeredOverlayForm> AllListOverlays()
@@ -1070,6 +1086,7 @@ internal static class SmokeTests
             var placed = DesktopViewApplicationContext.FindFreeListPlacement(
                 new Rectangle(20, 20, 360, 240), workArea, [new Rectangle(0, 0, 500, 600)]);
             Assert(!placed.IntersectsWith(new Rectangle(0, 0, 500, 600)) && workArea.Contains(placed), "new lists avoid existing lists");
+            Assert(AutoUpdateManager.IsNewerVersion(new Version(1, 0, 0), "v1.1.0", out var updateVersion) && updateVersion == new Version(1, 1, 0), "release version comparison");
 
             var desktopEntries = DesktopOverlayEntry.Load();
             Assert(desktopEntries.Any(entry => entry.IsVirtual && entry.Path == DesktopOverlayEntry.RecycleBinPath), "recycle bin appears in desktop list");

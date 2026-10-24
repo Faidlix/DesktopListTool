@@ -54,6 +54,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
     public event EventHandler<CustomListRequestedEventArgs>? CreateCustomListRequested;
     public event EventHandler? CustomPathsChanged;
     public event EventHandler? PlacementChanged;
+    public event EventHandler? CheckUpdateRequested;
     public string? FolderPath => _folderPath;
     public bool IsCustomList => _customList is not null;
     public bool IsFloating => _isFloating;
@@ -554,6 +555,16 @@ internal sealed class DesktopLayeredOverlayForm : Form
         menu.Items.Add("變成懸浮視窗", null, (_, _) => MakeFloating());
         if (_folderPath is not null || _customList is not null)
             menu.Items.Add("關閉清單", null, (_, _) => CloseListRequested?.Invoke(this, EventArgs.Empty));
+        menu.Items.Add(new ToolStripSeparator());
+        var autoUpdate = new ToolStripMenuItem("自動更新") { CheckOnClick = false, Checked = AutoUpdateManager.IsEnabled };
+        autoUpdate.Click += (_, _) =>
+        {
+            AutoUpdateManager.SetEnabled(!AutoUpdateManager.IsEnabled);
+            autoUpdate.Checked = AutoUpdateManager.IsEnabled;
+        };
+        menu.Items.Add(autoUpdate);
+        menu.Items.Add("立即檢查更新", null, (_, _) => CheckUpdateRequested?.Invoke(this, EventArgs.Empty));
+        menu.Opening += (_, _) => autoUpdate.Checked = AutoUpdateManager.IsEnabled;
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("重新整理", null, (_, _) => ReloadItems());
         return menu;
