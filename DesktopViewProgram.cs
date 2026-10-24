@@ -12,10 +12,10 @@ internal static class Program
     {
         ApplicationConfiguration.Initialize();
 
-        if (args.Length >= 5 && args[0].Equals("--shell-menu", StringComparison.OrdinalIgnoreCase))
+        if (args.Length >= 4 && args[0].Equals("--shell-menu", StringComparison.OrdinalIgnoreCase))
         {
-            if (int.TryParse(args[2], out var x) && int.TryParse(args[3], out var y) && long.TryParse(args[4], out var owner))
-                NativeShellContextMenu.TryShow((IntPtr)owner, args[1], new Point(x, y));
+            if (int.TryParse(args[2], out var x) && int.TryParse(args[3], out var y))
+                NativeShellContextMenu.TryShow(IntPtr.Zero, args[1], new Point(x, y));
             return;
         }
 
@@ -128,6 +128,7 @@ internal sealed class DesktopViewApplicationContext : ApplicationContext
     private readonly NotifyIcon _trayIcon;
     private readonly EventWaitHandle[] _commandEvents;
     private readonly RegisteredWaitHandle[] _registeredWaits;
+    private readonly DesktopBlankClickMonitor _blankClickMonitor;
 
     private readonly ToolStripMenuItem _startupItem;
     private bool _checkingForUpdate;
@@ -185,6 +186,7 @@ internal sealed class DesktopViewApplicationContext : ApplicationContext
         _notes.AddRange(DesktopNotesSettings.Load());
         foreach (var note in _notes)
             ShowNote(note);
+        _blankClickMonitor = new DesktopBlankClickMonitor(HandleDesktopBlankClick);
         WriteQaLayoutIfRequested();
         if (AutoUpdateManager.IsEnabled)
             _overlay.BeginInvoke(async () => { await Task.Delay(2500); await CheckForUpdatesAsync(interactive: false); });
@@ -334,6 +336,14 @@ internal sealed class DesktopViewApplicationContext : ApplicationContext
         foreach (var overlay in _customOverlays) yield return overlay;
     }
 
+    private void HandleDesktopBlankClick(Point screenPoint)
+    {
+        if (_overlay.IsDisposed || AllListOverlays().Any(value => !value.IsDisposed && value.Bounds.Contains(screenPoint)) ||
+            _noteForms.Any(value => !value.IsDisposed && value.Bounds.Contains(screenPoint))) return;
+        try { _overlay.BeginInvoke(() => { foreach (var overlay in AllListOverlays()) overlay.ClearSelectionFromDesktopClick(); }); }
+        catch (InvalidOperationException) { }
+    }
+
     private Rectangle FindFreePlacement(Rectangle candidate, DesktopLayeredOverlayForm self)
     {
         if (self.IsFloating)
@@ -444,6 +454,7 @@ internal sealed class DesktopViewApplicationContext : ApplicationContext
 
     protected override void ExitThreadCore()
     {
+        _blankClickMonitor.Dispose();
         _trayIcon.Visible = false;
         _trayIcon.Dispose();
         foreach (var wait in _registeredWaits)
@@ -1129,6 +1140,8 @@ internal static class SmokeTests
             Assert(desktopEntries.Any(entry => entry.IsVirtual && entry.Path == DesktopOverlayEntry.RecycleBinPath), "recycle bin appears in desktop list");
             using (var recycleIcon = DesktopOverlayEntry.GetIcon(DesktopOverlayEntry.RecycleBinPath, true))
                 Assert(recycleIcon is not null, "recycle bin icon available");
+            using (var overlayConstruction = new DesktopLayeredOverlayForm(ListItemSize.Standard))
+                Assert(overlayConstruction.Width >= overlayConstruction.MinimumSize.Width, "overlay constructs before resize callbacks");
 
             var referenceRoot = Path.Combine(Path.GetTempPath(), $"DesktopListTool-Reference-{Guid.NewGuid():N}");
             Directory.CreateDirectory(referenceRoot);
@@ -1148,12 +1161,18 @@ internal static class SmokeTests
                 Bold = true,
                 LineHeight = 38,
                 LineSpacing = 4,
-                CornerRadius = 18
+                CornerRadius = 18,
+                TextAlignment = OverlayTextAlignment.Center,
+                Distribution = OverlayContentDistribution.Fill
             }, "清單"))
             {
                 var themeOption = appearance.Controls.Cast<Control>().SelectMany(Descendants).OfType<CheckBox>().Single();
                 Assert(themeOption.Text.Contains("Windows 系統顏色"), "system color option is visible");
-                Assert(appearance.SelectedStyle.Bold && appearance.SelectedStyle.CornerRadius == 18, "extended style values round trip");
+                Assert(appearance.SelectedStyle.Bold && appearance.SelectedStyle.CornerRadius == 18 &&
+                    appearance.SelectedStyle.TextAlignment == OverlayTextAlignment.Center && appearance.SelectedStyle.Distribution == OverlayContentDistribution.Fill,
+                    "extended style values round trip");
+                Assert(appearance.AcceptButton is null, "style Enter does not confirm");
+                Assert(appearance.Controls.Cast<Control>().SelectMany(Descendants).OfType<SliderNumberControl>().Count() == 5, "all numeric style values use sliders");
                 var appearanceQa = Environment.GetEnvironmentVariable("DESKTOP_LIST_QA_APPEARANCE_PATH");
                 if (!string.IsNullOrWhiteSpace(appearanceQa))
                 {
@@ -1188,7 +1207,27 @@ internal static class SmokeTests
                     Directory.Delete(transferRoot, recursive: true);
             }
 
-            var note = new DesktopNoteData { Text = "第一段\r\n第二段", X = 40, Y = 40, Width = 320, Height = 240 };
+            var note = new DesktopNoteData
+            {
+                Text = "## 每週回顧\r\n**完成：** Markdown 顯示與安全圓角\r\n- 第一個項目\r\n- 第二個項目\r\n> 這是一段引言\r\n`inline code` 與 [連結](https://example.invalid)\r\n第七行用來確認內容超出時可捲動\r\n第八行仍需保留",
+                X = 40, Y = 40, Width = 420, Height = 180, CornerRadius = 42
+            };
+            var markdown = MarkdownNoteRenderer.ParseLine("## **標題**與[連結](https://example.invalid)");
+            Assert(markdown.HeadingLevel == 2 && markdown.Runs.Any(value => value.Style.HasFlag(FontStyle.Bold)) && markdown.Runs.Any(value => value.Style.HasFlag(FontStyle.Underline)), "Markdown formatting parses");
+            using (var editor = new NoteEditorDialog(note))
+            {
+                Assert(editor.AcceptButton is null, "note editor Enter does not confirm");
+                var descendants = editor.Controls.Cast<Control>().SelectMany(value => new[] { value }.Concat(Descendants(value))).ToArray();
+                Assert(descendants.OfType<SplitContainer>().Any(), "note editor text and checklist ranges are adjustable");
+                var addButton = descendants.OfType<Button>().Single(value => value.Text.Contains("新增勾選事項"));
+                Assert(addButton.AutoSize && addButton.Width >= addButton.PreferredSize.Width, "add checklist label is not clipped");
+                var editorQa = Environment.GetEnvironmentVariable("DESKTOP_LIST_QA_EDITOR_PATH");
+                if (!string.IsNullOrWhiteSpace(editorQa))
+                {
+                    editor.StartPosition = FormStartPosition.Manual; editor.Location = new Point(-10000, -10000); editor.Show(); Application.DoEvents();
+                    using var image = new Bitmap(editor.Width, editor.Height); editor.DrawToBitmap(image, new Rectangle(Point.Empty, image.Size)); image.Save(editorQa); editor.Hide();
+                }
+            }
             using (var noteForm = new DesktopLayeredNoteForm(note))
             {
                 Assert(noteForm.ContextMenuLabels.Contains("新增便籤…") && noteForm.ContextMenuLabels.Contains("樣式…"), "note menu exposes new note and style");
@@ -1198,6 +1237,11 @@ internal static class SmokeTests
                     new DesktopChecklistItem { Text = "待完成", Completed = false }
                 ]);
                 Assert(note.Items.Count == 2 && !note.Items[0].Completed && note.Items[1].Completed, "completed checklist moves to bottom");
+                if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("DESKTOP_LIST_QA_NOTE_PATH")))
+                {
+                    noteForm.StartPosition = FormStartPosition.Manual; noteForm.Location = new Point(-10000, -10000); noteForm.Show(); Application.DoEvents();
+                    Assert(noteForm.HasScrollableContent, "small note retains overflow content"); noteForm.ScrollForTest(120); Assert(noteForm.ScrollOffset > 0, "small note scrolls vertically"); noteForm.Hide();
+                }
             }
 
             Console.WriteLine($"DESKTOP_VIEW_SMOKE_PASSED CURRENT={current}");

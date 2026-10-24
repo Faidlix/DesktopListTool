@@ -8,11 +8,13 @@
     <AssemblyName>DesktopListTool</AssemblyName>
     <RootNamespace>DesktopListTool</RootNamespace>
     <ApplicationManifest>app.manifest</ApplicationManifest>
-    <Version>1.1.2</Version>
-    <AssemblyVersion>1.1.2.0</AssemblyVersion>
-    <FileVersion>1.1.2.0</FileVersion>
+    <Version>1.2.0</Version>
+    <AssemblyVersion>1.2.0.0</AssemblyVersion>
+    <FileVersion>1.2.0.0</FileVersion>
   </PropertyGroup>
   <ItemGroup>
     <Compile Remove="Program.cs" />
+    <Compile Remove="OverlayStyleDialog.cs" />
+    <Compile Remove="NativeShellContextMenu.cs" />
   </ItemGroup>
 </Project>

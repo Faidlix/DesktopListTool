@@ -1,5 +1,5 @@
-// 功能：建立、顯示、編輯與保存桌面便籤，支援多段文字及會自動移到底部的勾選事項。
-// 使用：在清單空白處右鍵選「新增便籤」；Shift+Enter 換行、Enter 確定、Esc 取消。
+// 功能：建立、顯示、編輯與保存桌面便籤，支援 Markdown、多段文字及會自動移到底部的勾選事項。
+// 使用：在清單空白處右鍵選「新增便籤」；Enter 換行，只有點「確定」才保存，Esc 取消。
 // 設定：便籤右鍵可編輯或刪除；位置、大小、內容與勾選狀態保存於目前使用者登錄設定。
 
 using System.Runtime.InteropServices;
@@ -27,11 +27,28 @@ internal sealed class DesktopNoteData
     public int LineHeight { get; set; } = 30;
     public int LineSpacing { get; set; }
     public int CornerRadius { get; set; }
+    public OverlayTextAlignment TextAlignment { get; set; }
+    public OverlayContentDistribution Distribution { get; set; }
 
     public Rectangle Bounds
     {
         get => new(X, Y, Math.Max(240, Width), Math.Max(140, Height));
         set { X = value.X; Y = value.Y; Width = value.Width; Height = value.Height; }
+    }
+}
+
+internal static class NoteEditorSettings
+{
+    private const string KeyPath = @"Software\DesktopListTool";
+    public static int LoadSplitter()
+    {
+        try { using var key = Registry.CurrentUser.OpenSubKey(KeyPath); return Math.Clamp(Convert.ToInt32(key?.GetValue("NoteEditorSplitter", 220) ?? 220), 120, 520); }
+        catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException or FormatException) { return 220; }
+    }
+    public static void SaveSplitter(int value)
+    {
+        try { using var key = Registry.CurrentUser.CreateSubKey(KeyPath); key.SetValue("NoteEditorSplitter", value, RegistryValueKind.DWord); }
+        catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException) { }
     }
 }
 
@@ -279,50 +296,63 @@ internal sealed class NoteEditorDialog : Form
 {
     private readonly TextBox _body = new();
     private readonly FlowLayoutPanel _taskRows = new();
+    private readonly SplitContainer _split = new() { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, FixedPanel = FixedPanel.None, Panel1MinSize = 100, Panel2MinSize = 120, SplitterWidth = 7 };
 
     public NoteEditorDialog(DesktopNoteData? existing = null)
     {
         Text = existing is null ? "新增便籤" : "編輯便籤";
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.Sizable;
-        MinimumSize = new Size(500, 460);
-        ClientSize = new Size(600, 580);
+        MinimumSize = new Size(560, 480);
+        ClientSize = new Size(760, 640);
         ShowInTaskbar = false;
+        AutoScaleMode = AutoScaleMode.Dpi;
         Font = new Font("Microsoft JhengHei UI", 10F);
 
-        var bodyLabel = new Label { Text = "文字內容（Shift+Enter 換行）", AutoSize = true, Location = new Point(18, 16) };
+        var bodyPanel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(18, 14, 18, 8) };
+        var bodyLabel = new Label { Text = "文字內容（支援 Markdown，Enter 換行）", AutoSize = true, Dock = DockStyle.Top };
         _body.Multiline = true;
         _body.AcceptsReturn = true;
+        _body.AcceptsTab = true;
         _body.ScrollBars = ScrollBars.Vertical;
         _body.Text = existing?.Text ?? "";
-        _body.Location = new Point(18, 42);
-        _body.Size = new Size(564, 180);
-        _body.Anchor = AnchorStyles.Top | AnchorStyles.Left | AnchorStyles.Right;
+        _body.Dock = DockStyle.Fill;
+        _body.Margin = new Padding(0, 8, 0, 0);
         _body.KeyDown += EditorKeyDown;
+        bodyPanel.Controls.Add(_body);
+        bodyPanel.Controls.Add(new Panel { Dock = DockStyle.Top, Height = 8 });
+        bodyPanel.Controls.Add(bodyLabel);
 
-        var tasksLabel = new Label { Text = "勾選事項", AutoSize = true, Location = new Point(18, 238) };
-        var addTask = new Button { Text = "＋ 新增勾選事項", Size = new Size(150, 32), Location = new Point(432, 230), Anchor = AnchorStyles.Top | AnchorStyles.Right };
+        var tasksPanel = new Panel { Dock = DockStyle.Fill, Padding = new Padding(18, 8, 18, 8) };
+        var tasksHeader = new TableLayoutPanel { Dock = DockStyle.Top, Height = 42, ColumnCount = 2 };
+        tasksHeader.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        tasksHeader.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        var tasksLabel = new Label { Text = "勾選事項", AutoSize = true, Anchor = AnchorStyles.Left };
+        var addTask = new Button { Text = "＋ 新增勾選事項", AutoSize = true, AutoSizeMode = AutoSizeMode.GrowAndShrink, MinimumSize = new Size(190, 34), Anchor = AnchorStyles.Right };
         addTask.Click += (_, _) => AddTaskRow(null);
-
-        _taskRows.Location = new Point(18, 270);
-        _taskRows.Size = new Size(564, 240);
-        _taskRows.Anchor = AnchorStyles.Top | AnchorStyles.Bottom | AnchorStyles.Left | AnchorStyles.Right;
+        tasksHeader.Controls.Add(tasksLabel, 0, 0); tasksHeader.Controls.Add(addTask, 1, 0);
+        _taskRows.Dock = DockStyle.Fill;
         _taskRows.FlowDirection = FlowDirection.TopDown;
         _taskRows.WrapContents = false;
         _taskRows.AutoScroll = true;
+        tasksPanel.Controls.Add(_taskRows); tasksPanel.Controls.Add(tasksHeader);
+        _split.Panel1.Controls.Add(bodyPanel); _split.Panel2.Controls.Add(tasksPanel);
 
-        var ok = new Button { Text = "確定", DialogResult = DialogResult.OK, Size = new Size(90, 34), Anchor = AnchorStyles.Bottom | AnchorStyles.Right };
-        var cancel = new Button { Text = "取消", DialogResult = DialogResult.Cancel, Size = new Size(90, 34), Anchor = AnchorStyles.Bottom | AnchorStyles.Right };
-        ok.Location = new Point(392, 530);
-        cancel.Location = new Point(492, 530);
-        Resize += (_, _) => { ok.Location = new Point(ClientSize.Width - 208, ClientSize.Height - 50); cancel.Location = new Point(ClientSize.Width - 108, ClientSize.Height - 50); };
-        AcceptButton = ok;
+        var buttons = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 58, FlowDirection = FlowDirection.RightToLeft, Padding = new Padding(10) };
+        var cancel = new Button { Text = "取消", DialogResult = DialogResult.Cancel, Size = new Size(90, 34) };
+        var ok = new Button { Text = "確定", DialogResult = DialogResult.OK, Size = new Size(90, 34) };
+        buttons.Controls.AddRange([cancel, ok]);
         CancelButton = cancel;
-        Controls.AddRange([bodyLabel, _body, tasksLabel, addTask, _taskRows, ok, cancel]);
+        Controls.Add(_split); Controls.Add(buttons);
 
         foreach (var item in existing?.Items ?? [])
             AddTaskRow(item);
-        Shown += (_, _) => _body.Focus();
+        Shown += (_, _) =>
+        {
+            _split.SplitterDistance = Math.Clamp(NoteEditorSettings.LoadSplitter(), _split.Panel1MinSize, Math.Max(_split.Panel1MinSize, _split.Height - _split.Panel2MinSize));
+            _body.Focus();
+        };
+        FormClosed += (_, _) => NoteEditorSettings.SaveSplitter(_split.SplitterDistance);
     }
 
     public string NoteText => _body.Text;
@@ -340,7 +370,7 @@ internal sealed class NoteEditorDialog : Form
 
     private void AddTaskRow(DesktopChecklistItem? item)
     {
-        var panel = new Panel { Width = Math.Max(420, _taskRows.ClientSize.Width - 28), Height = 38, Tag = item };
+        var panel = new Panel { Width = Math.Max(420, _taskRows.ClientSize.Width - 28), Height = 42, Tag = item, Margin = new Padding(0, 2, 0, 2) };
         var input = new TextBox { Text = item?.Text ?? "", Location = new Point(0, 4), Width = panel.Width - 48, Anchor = AnchorStyles.Left | AnchorStyles.Right | AnchorStyles.Top };
         input.KeyDown += EditorKeyDown;
         var remove = new Button { Text = "×", Location = new Point(panel.Width - 40, 2), Size = new Size(36, 30), Anchor = AnchorStyles.Right | AnchorStyles.Top };
@@ -357,11 +387,10 @@ internal sealed class NoteEditorDialog : Form
             DialogResult = DialogResult.Cancel;
             Close();
         }
-        else if (e.KeyCode == Keys.Enter && !e.Shift)
+        else if (e.KeyCode == Keys.Enter && sender != _body)
         {
-            DialogResult = DialogResult.OK;
-            Close();
             e.SuppressKeyPress = true;
+            e.Handled = true;
         }
     }
 }

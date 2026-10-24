@@ -151,6 +151,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
     protected override void OnResize(EventArgs e)
     {
         base.OnResize(e);
+        if (_style is null) return;
         ClampScroll();
         RenderLayer();
     }
@@ -246,6 +247,16 @@ internal sealed class DesktopLayeredOverlayForm : Form
     private bool UseHorizontalLayout => ClientSize.Width >= ClientSize.Height * 1.35;
 
     private int RowsPerColumn => Math.Max(1, (ClientSize.Height - ContentPadding * 2) / Math.Max(1, _rowHeight));
+    private int LayoutRowHeight
+    {
+        get
+        {
+            if (_style.Distribution != OverlayContentDistribution.Fill || _entries.Count == 0) return _rowHeight;
+            var available = Math.Max(_rowHeight, ClientSize.Height - ContentPadding * 2);
+            var rows = UseHorizontalLayout ? Math.Min(_entries.Count, RowsPerColumn) : _entries.Count;
+            return Math.Max(_rowHeight, available / Math.Max(1, rows));
+        }
+    }
 
     private void HandleMouseMove(object? sender, MouseEventArgs e)
     {
@@ -340,6 +351,8 @@ internal sealed class DesktopLayeredOverlayForm : Form
         RenderLayer();
     }
 
+    public void ClearSelectionFromDesktopClick() => ClearSelection();
+
     private void SetHoveredIndex(int index)
     {
         if (_hoveredIndex == index)
@@ -358,13 +371,13 @@ internal sealed class DesktopLayeredOverlayForm : Form
         {
             var contentX = point.X - ContentPadding + _scrollOffset;
             var column = contentX / Math.Max(1, _columnWidth);
-            var row = (point.Y - ContentPadding) / Math.Max(1, _rowHeight);
+            var row = (point.Y - ContentPadding) / Math.Max(1, LayoutRowHeight);
             index = column * RowsPerColumn + row;
         }
         else
         {
             var contentY = point.Y - ContentPadding + _scrollOffset;
-            index = contentY / Math.Max(1, _rowHeight);
+            index = contentY / Math.Max(1, LayoutRowHeight);
         }
         return index >= 0 && index < _entries.Count ? index : -1;
     }
@@ -381,7 +394,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
         else
         {
             var viewportHeight = Math.Max(0, ClientSize.Height - ContentPadding * 2);
-            maximum = Math.Max(0, _entries.Count * _rowHeight - viewportHeight);
+            maximum = Math.Max(0, _entries.Count * LayoutRowHeight - viewportHeight);
         }
         _scrollOffset = Math.Clamp(_scrollOffset, 0, maximum);
     }
@@ -451,10 +464,11 @@ internal sealed class DesktopLayeredOverlayForm : Form
 
     private void DrawVerticalEntries(Graphics graphics)
     {
-        var firstIndex = _scrollOffset / _rowHeight;
-        var y = ContentPadding - (_scrollOffset % _rowHeight);
-        for (var index = firstIndex; index < _entries.Count && y < ClientSize.Height - ContentPadding; index++, y += _rowHeight)
-            DrawEntry(graphics, _entries[index], index, new Rectangle(ContentPadding, y, Math.Max(1, ClientSize.Width - ContentPadding * 2), _rowHeight));
+        var step = LayoutRowHeight;
+        var firstIndex = _scrollOffset / step;
+        var y = ContentPadding - (_scrollOffset % step);
+        for (var index = firstIndex; index < _entries.Count && y < ClientSize.Height - ContentPadding; index++, y += step)
+            DrawEntry(graphics, _entries[index], index, new Rectangle(ContentPadding, y, Math.Max(1, ClientSize.Width - ContentPadding * 2), step));
     }
 
     private void DrawHorizontalEntries(Graphics graphics)
@@ -467,25 +481,26 @@ internal sealed class DesktopLayeredOverlayForm : Form
             var x = ContentPadding + column * _columnWidth - _scrollOffset;
             if (x + _columnWidth < ContentPadding || x >= ClientSize.Width - ContentPadding)
                 continue;
-            var y = ContentPadding + row * _rowHeight;
-            DrawEntry(graphics, _entries[index], index, new Rectangle(x, y, _columnWidth, _rowHeight));
+            var y = ContentPadding + row * LayoutRowHeight;
+            DrawEntry(graphics, _entries[index], index, new Rectangle(x, y, _columnWidth, LayoutRowHeight));
         }
     }
 
     private void DrawEntry(Graphics graphics, LayeredEntry entry, int index, Rectangle rowBounds)
     {
+        var visualBounds = GetVisualEntryBounds(entry, rowBounds);
         if (index == _hoveredIndex || index == _selectedIndex)
         {
             using var rowBrush = new SolidBrush(index == _selectedIndex
                 ? Color.FromArgb(135, 37, 99, 235)
                 : Color.FromArgb(80, 71, 85, 105));
-            graphics.FillRoundedRectangle(rowBrush, rowBounds, 6);
+            graphics.FillRoundedRectangle(rowBrush, visualBounds, 6);
         }
 
-        var iconY = rowBounds.Y + (_rowHeight - _iconSize) / 2;
-        graphics.DrawIcon(entry.Icon, new Rectangle(rowBounds.X + 6, iconY, _iconSize, _iconSize));
-        var textX = rowBounds.X + _iconSize + 14;
-        var textY = rowBounds.Y + (_rowHeight - _itemFont.GetHeight(graphics)) / 2F;
+        var iconY = visualBounds.Y + (visualBounds.Height - _iconSize) / 2;
+        graphics.DrawIcon(entry.Icon, new Rectangle(visualBounds.X + 6, iconY, _iconSize, _iconSize));
+        var textX = visualBounds.X + _iconSize + 14;
+        var textY = visualBounds.Y + (visualBounds.Height - _itemFont.GetHeight(graphics)) / 2F;
         using var shadowBrush = new SolidBrush(Color.FromArgb(210, 0, 0, 0));
         using var textBrush = new SolidBrush(Color.White);
         graphics.DrawString(entry.Name, _itemFont, shadowBrush, textX + 1, textY + 1);
@@ -493,8 +508,21 @@ internal sealed class DesktopLayeredOverlayForm : Form
         if (index == _dropFolderIndex)
         {
             using var targetPen = new Pen(Color.FromArgb(245, 96, 165, 250), 2F);
-            graphics.DrawRectangle(targetPen, Rectangle.Inflate(rowBounds, -1, -1));
+            graphics.DrawRectangle(targetPen, Rectangle.Inflate(visualBounds, -1, -1));
         }
+    }
+
+    private Rectangle GetVisualEntryBounds(LayeredEntry entry, Rectangle rowBounds)
+    {
+        var textWidth = TextRenderer.MeasureText(entry.Name, _itemFont, Size.Empty, TextFormatFlags.NoPadding).Width;
+        var width = Math.Min(rowBounds.Width, Math.Max(_iconSize + 24, textWidth + _iconSize + 26));
+        var x = _style.TextAlignment switch
+        {
+            OverlayTextAlignment.Center => rowBounds.Left + Math.Max(0, (rowBounds.Width - width) / 2),
+            OverlayTextAlignment.Right => rowBounds.Right - width,
+            _ => rowBounds.Left
+        };
+        return new Rectangle(x, rowBounds.Y, width, rowBounds.Height);
     }
 
     private void DrawDropIndicator(Graphics graphics)
@@ -599,7 +627,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
         RenderLayer();
     }
 
-    private Rectangle FloatingReturnButtonBounds => new(Math.Max(12, ClientSize.Width - 116), 8, 98, 28);
+    private Rectangle FloatingReturnButtonBounds => new(Math.Max(4, ClientSize.Width - 34), 4, 28, 28);
 
     private void MakeFloating()
     {
@@ -624,13 +652,11 @@ internal sealed class DesktopLayeredOverlayForm : Form
     {
         using var background = new SolidBrush(Color.FromArgb(225, 30, 41, 59));
         graphics.FillRoundedRectangle(background, FloatingReturnButtonBounds, 6);
-        using var textBrush = new SolidBrush(Color.White);
-        using var font = new Font("Microsoft JhengHei UI", 9F, FontStyle.Bold);
-        const string text = "回到桌面";
-        var size = graphics.MeasureString(text, font);
-        graphics.DrawString(text, font, textBrush,
-            FloatingReturnButtonBounds.X + (FloatingReturnButtonBounds.Width - size.Width) / 2,
-            FloatingReturnButtonBounds.Y + (FloatingReturnButtonBounds.Height - size.Height) / 2);
+        using var pen = new Pen(Color.White, 2F);
+        var centerX = FloatingReturnButtonBounds.Left + FloatingReturnButtonBounds.Width / 2;
+        graphics.DrawEllipse(pen, centerX - 5, FloatingReturnButtonBounds.Top + 5, 10, 7);
+        graphics.DrawLine(pen, centerX - 6, FloatingReturnButtonBounds.Top + 14, centerX + 6, FloatingReturnButtonBounds.Top + 14);
+        graphics.DrawLine(pen, centerX, FloatingReturnButtonBounds.Top + 12, centerX, FloatingReturnButtonBounds.Bottom - 5);
     }
 
     private void HandleUserPreferenceChanged(object sender, UserPreferenceChangedEventArgs e)
@@ -791,10 +817,10 @@ internal sealed class DesktopLayeredOverlayForm : Form
             var column = index / RowsPerColumn;
             var row = index % RowsPerColumn;
             return new Rectangle(ContentPadding + column * _columnWidth - _scrollOffset,
-                ContentPadding + row * _rowHeight, _columnWidth, _rowHeight);
+                ContentPadding + row * LayoutRowHeight, _columnWidth, LayoutRowHeight);
         }
-        return new Rectangle(ContentPadding, ContentPadding + index * _rowHeight - _scrollOffset,
-            Math.Max(1, ClientSize.Width - ContentPadding * 2), _rowHeight);
+        return new Rectangle(ContentPadding, ContentPadding + index * LayoutRowHeight - _scrollOffset,
+            Math.Max(1, ClientSize.Width - ContentPadding * 2), LayoutRowHeight);
     }
 
     private void HandleDragDrop(object? sender, DragEventArgs e)
