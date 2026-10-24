@@ -3,6 +3,7 @@ bin/
 obj/
 publish/
 .dotnet-cli/
+.build-temp/
 
 # Locally generated packages and QA captures
 artifacts/

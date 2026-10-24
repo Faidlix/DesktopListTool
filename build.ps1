@@ -8,10 +8,14 @@ $cliHome = Join-Path $projectRoot '.dotnet-cli'
 $publishDir = Join-Path $projectRoot 'publish\win-x64'
 $artifactsDir = Join-Path $projectRoot 'artifacts'
 $zipPath = Join-Path $artifactsDir 'DesktopListTool-win-x64.zip'
+$testTemp = Join-Path $projectRoot '.build-temp'
 
 $env:DOTNET_CLI_HOME = $cliHome
 $env:DOTNET_SKIP_FIRST_TIME_EXPERIENCE = '1'
 $env:DOTNET_NOLOGO = '1'
+New-Item -ItemType Directory -Force -Path $testTemp | Out-Null
+$env:TEMP = $testTemp
+$env:TMP = $testTemp
 
 dotnet build (Join-Path $projectRoot 'DesktopListTool.csproj') -c Release
 if ($LASTEXITCODE -ne 0) { throw 'Build failed.' }
