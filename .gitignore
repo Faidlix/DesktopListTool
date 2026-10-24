@@ -1,0 +1,16 @@
+# .NET build output and local tooling caches
+bin/
+obj/
+publish/
+.dotnet-cli/
+
+# Locally generated packages and QA captures
+artifacts/
+
+# Superseded prototype; the active entry point is DesktopViewProgram.cs
+/Program.cs
+
+# IDE and user-local files
+.vs/
+*.user
+*.suo
