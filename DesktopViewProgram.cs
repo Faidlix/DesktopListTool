@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using Microsoft.Win32;
@@ -10,6 +11,19 @@ internal static class Program
     private static void Main(string[] args)
     {
         ApplicationConfiguration.Initialize();
+
+        if (args.Length >= 5 && args[0].Equals("--shell-menu", StringComparison.OrdinalIgnoreCase))
+        {
+            if (int.TryParse(args[2], out var x) && int.TryParse(args[3], out var y) && long.TryParse(args[4], out var owner))
+                NativeShellContextMenu.TryShow((IntPtr)owner, args[1], new Point(x, y));
+            return;
+        }
+
+        if (args.Length >= 2 && args[0].Equals("--watchdog", StringComparison.OrdinalIgnoreCase))
+        {
+            if (int.TryParse(args[1], out var processId)) RestoreDesktopAfterProcessExit(processId);
+            return;
+        }
 
         if (args.Contains("--smoke-test", StringComparer.OrdinalIgnoreCase))
         {
@@ -76,7 +90,30 @@ internal static class Program
             return;
         }
 
+        StartCrashWatchdog();
         Application.Run(new DesktopViewApplicationContext(size));
+    }
+
+    private static void RestoreDesktopAfterProcessExit(int processId)
+    {
+        try { Process.GetProcessById(processId).WaitForExit(); }
+        catch (ArgumentException) { }
+        DesktopViewController.SetDesktopIconsVisible(true);
+        DesktopViewController.TrySetIconView(out _);
+    }
+
+    private static void StartCrashWatchdog()
+    {
+        var executable = Environment.ProcessPath;
+        if (string.IsNullOrWhiteSpace(executable) || !executable.EndsWith("DesktopListTool.exe", StringComparison.OrdinalIgnoreCase)) return;
+        try
+        {
+            var start = new ProcessStartInfo(executable) { UseShellExecute = false, CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden };
+            start.ArgumentList.Add("--watchdog");
+            start.ArgumentList.Add(Environment.ProcessId.ToString());
+            Process.Start(start);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception) { }
     }
 }
 
@@ -1099,6 +1136,7 @@ internal static class SmokeTests
             File.WriteAllText(referenceFile, "reference-only");
             var referenced = DesktopOverlayEntry.LoadPaths([referenceFile]);
             Assert(referenced.Count == 1 && File.Exists(referenceFile), "custom list references without moving source");
+            Assert(NativeShellContextMenu.TryShow(IntPtr.Zero, referenceFile, Point.Empty, display: false), "native shell context menu marshaling");
             Directory.Delete(referenceRoot, recursive: true);
 
             using (var appearance = new OverlayStyleDialog(new OverlayStyleOptions

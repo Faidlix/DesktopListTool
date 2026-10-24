@@ -1,14 +1,34 @@
-// 功能：在清單檔案項目上顯示 Windows Shell 原生右鍵選單並執行所選命令。
-// 使用：DesktopLayeredOverlayForm 在項目右鍵時呼叫 TryShow；失敗時回退工具選單。
-// 設定：僅接受存在的本機檔案或資料夾，不處理虛擬 Shell 項目。
+// 功能：在獨立輔助程序顯示 Windows Shell 原生右鍵選單，隔離第三方 Shell 外掛的原生崩潰。
+// 使用：主視窗呼叫 TryShowIsolated；輔助程序再呼叫 TryShow，失敗不會中止桌面清單主程序。
+// 設定：僅接受存在的本機檔案或資料夾；PIDL 陣列使用 LPArray 正確封送。
 
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 
 namespace DesktopListTool;
 
 internal static class NativeShellContextMenu
 {
-    public static bool TryShow(IntPtr owner, string path, Point screenPoint)
+    public static bool TryShowIsolated(IntPtr owner, string path, Point screenPoint)
+    {
+        if (!File.Exists(path) && !Directory.Exists(path)) return false;
+        var executable = Environment.ProcessPath;
+        if (string.IsNullOrWhiteSpace(executable) || !executable.EndsWith("DesktopListTool.exe", StringComparison.OrdinalIgnoreCase)) return false;
+        try
+        {
+            var start = new ProcessStartInfo(executable) { UseShellExecute = false };
+            start.ArgumentList.Add("--shell-menu");
+            start.ArgumentList.Add(path);
+            start.ArgumentList.Add(screenPoint.X.ToString());
+            start.ArgumentList.Add(screenPoint.Y.ToString());
+            start.ArgumentList.Add(owner.ToInt64().ToString());
+            Process.Start(start);
+            return true;
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception) { return false; }
+    }
+
+    public static bool TryShow(IntPtr owner, string path, Point screenPoint, bool display = true)
     {
         if (!File.Exists(path) && !Directory.Exists(path))
             return false;
@@ -32,6 +52,7 @@ internal static class NativeShellContextMenu
             menu = CreatePopupMenu();
             if (menu == IntPtr.Zero || context.QueryContextMenu(menu, 0, 1, 0x7FFF, 0x00000004) < 0)
                 return false;
+            if (!display) return true;
             SetForegroundWindow(owner);
             var command = TrackPopupMenuEx(menu, 0x0100 | 0x0002, screenPoint.X, screenPoint.Y, owner, IntPtr.Zero);
             if (command > 0)
@@ -66,8 +87,8 @@ internal static class NativeShellContextMenu
         [PreserveSig] int BindToStorage(IntPtr pidl, IntPtr bind, ref Guid iid, out IntPtr result);
         [PreserveSig] int CompareIDs(IntPtr lParam, IntPtr pidl1, IntPtr pidl2);
         [PreserveSig] int CreateViewObject(IntPtr hwnd, ref Guid iid, out IntPtr result);
-        [PreserveSig] int GetAttributesOf(uint count, IntPtr[] pidls, ref uint attributes);
-        [PreserveSig] int GetUIObjectOf(IntPtr hwnd, uint count, IntPtr[] pidls, ref Guid iid, IntPtr reserved, out IntPtr result);
+        [PreserveSig] int GetAttributesOf(uint count, [MarshalAs(UnmanagedType.LPArray, SizeParamIndex = 0)] IntPtr[] pidls, ref uint attributes);
+        [PreserveSig] int GetUIObjectOf(IntPtr hwnd, uint count, [MarshalAs(UnmanagedType.LPArray, SizeParamIndex = 1)] IntPtr[] pidls, ref Guid iid, IntPtr reserved, out IntPtr result);
     }
 
     [ComImport, Guid("000214E4-0000-0000-C000-000000000046"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]

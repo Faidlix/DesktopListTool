@@ -272,7 +272,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
                 SelectIndex(index);
             else
                 ClearSelection();
-            if (index >= 0 && NativeShellContextMenu.TryShow(Handle, _entries[index].Path, _lastContextMenuScreenPoint))
+            if (index >= 0 && NativeShellContextMenu.TryShowIsolated(Handle, _entries[index].Path, _lastContextMenuScreenPoint))
                 return;
             _menu?.Show(this, e.Location);
             return;
@@ -906,13 +906,21 @@ internal sealed class DesktopLayeredOverlayForm : Form
         if (string.IsNullOrWhiteSpace(path) || !Directory.Exists(path))
             return null;
         var watcher = new FileSystemWatcher(path) { EnableRaisingEvents = true };
-        FileSystemEventHandler changed = (_, _) => BeginInvoke(ReloadItems);
-        RenamedEventHandler renamed = (_, _) => BeginInvoke(ReloadItems);
+        FileSystemEventHandler changed = (_, _) => ScheduleReload();
+        RenamedEventHandler renamed = (_, _) => ScheduleReload();
         watcher.Created += changed;
         watcher.Deleted += changed;
         watcher.Changed += changed;
         watcher.Renamed += renamed;
         return watcher;
+    }
+
+    private void ScheduleReload()
+    {
+        if (IsDisposed || Disposing || !IsHandleCreated) return;
+        try { BeginInvoke(ReloadItems); }
+        catch (ObjectDisposedException) { }
+        catch (InvalidOperationException) { }
     }
 
     protected override void WndProc(ref Message message)
