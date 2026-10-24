@@ -130,7 +130,10 @@ internal static class AutoUpdateManager
 param([int]$ProcessId,[string]$Source,[string]$Destination,[string]$Executable,[string]$TempRoot)
 $ErrorActionPreference='Stop'
 try {
-    Wait-Process -Id $ProcessId -Timeout 30 -ErrorAction SilentlyContinue
+    $deadline=(Get-Date).AddSeconds(30)
+    while ((Get-Process -Id $ProcessId -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) {
+        Start-Sleep -Milliseconds 200
+    }
     New-Item -ItemType Directory -Force -Path $Destination | Out-Null
     Copy-Item -Path (Join-Path $Source '*') -Destination $Destination -Recurse -Force
     Start-Process -FilePath $Executable -ArgumentList '--list','standard' -WindowStyle Hidden
