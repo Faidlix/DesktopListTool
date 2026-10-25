@@ -18,6 +18,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
     private readonly System.Windows.Forms.Timer _hoverTimer = new() { Interval = 100 };
     private readonly List<LayeredEntry> _entries = [];
     private readonly HashSet<string> _excludedPaths = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _referencePaths = new(StringComparer.OrdinalIgnoreCase);
     private readonly FileSystemWatcher? _personalWatcher;
     private readonly FileSystemWatcher? _publicWatcher;
     private readonly string? _folderPath;
@@ -44,6 +45,8 @@ internal sealed class DesktopLayeredOverlayForm : Form
     private int _dropFolderIndex = -1;
     private string? _dropTargetPath;
     private bool _dropIsArchive;
+    private bool _dropIsRecycleBin;
+    private bool _dropIsCrossListReference;
     private int _dropInsertIndex = -1;
     private OverlaySortMode _sortMode;
     private bool _sortAscending;
@@ -52,6 +55,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
     private bool _dragCancelled;
     private bool _dropIsCopy;
     private Point _lastDragClientPoint;
+    private ShortcutKeyHost? _shortcutKeyHost;
 
     public event EventHandler? AddFolderRequested;
     public event EventHandler? CloseListRequested;
@@ -60,6 +64,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
     public event EventHandler? CustomPathsChanged;
     public event EventHandler? PlacementChanged;
     public event EventHandler? CheckUpdateRequested;
+    public event EventHandler? PhysicalPathsChanged;
     internal Action<Form, Rectangle>? PlacementPreview;
     internal Action<Form>? PlacementCompleted;
     public string? FolderPath => _folderPath;
@@ -74,6 +79,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
     internal void SetResizeCornerForTest(OverlayResizeCorner corner) { _resizeHoverCorner = corner; _frameVisible = true; RenderLayer(); }
     internal Func<DesktopLayeredOverlayForm, Rectangle, Rectangle>? ResolvePlacement;
     private string? SettingsIdentity => _customList is null ? _folderPath : $"custom:{_customList.Id:N}";
+    private string DragIdentity => SettingsIdentity ?? "desktop";
 
     public DesktopLayeredOverlayForm(ListItemSize itemSize, string? folderPath = null, Rectangle? defaultBounds = null, CustomListData? customList = null)
     {
@@ -89,6 +95,8 @@ internal sealed class DesktopLayeredOverlayForm : Form
         AllowDrop = true;
         (_sortMode, _sortAscending) = OverlayOrderSettings.LoadSort(SettingsIdentity);
         _displayMode = OverlayOrderSettings.LoadDisplayMode(SettingsIdentity);
+        if (_customList is null)
+            foreach (var path in OverlayOrderSettings.LoadReferencePaths(SettingsIdentity)) _referencePaths.Add(path);
         _style = OverlayAppearanceSettings.LoadStyle(SettingsIdentity, DefaultStyle(itemSize));
         var qaStyleJson = Environment.GetEnvironmentVariable("DESKTOP_LIST_QA_STYLE_JSON");
         if (!string.IsNullOrWhiteSpace(qaStyleJson))
@@ -109,6 +117,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
         MouseMove += HandleMouseMove;
         MouseLeave += (_, _) => SetHoveredIndex(-1);
         MouseDown += HandleMouseDown;
+        MouseUp += HandleMouseUp;
         MouseDoubleClick += HandleMouseDoubleClick;
         MouseWheel += HandleMouseWheel;
         KeyDown += HandleKeyDown;
@@ -224,6 +233,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
         OverlaySettings.SaveFloating(SettingsIdentity, _isFloating);
         OverlayAppearanceSettings.SaveStyle(SettingsIdentity, _style);
     }
+    internal void RefreshItems() => ReloadItems();
 
     private void ReloadItems()
     {
@@ -235,6 +245,9 @@ internal sealed class DesktopLayeredOverlayForm : Form
         var sourceEntries = _customList is null
             ? DesktopOverlayEntry.Load(_folderPath)
             : DesktopOverlayEntry.LoadPaths(_customList.Paths);
+        if (_customList is null && _referencePaths.Count > 0)
+            sourceEntries = sourceEntries.Concat(DesktopOverlayEntry.LoadPaths(_referencePaths))
+                .GroupBy(value => value.Path, StringComparer.OrdinalIgnoreCase).Select(value => value.First()).ToArray();
         if (_customList is null && _folderPath is null && _excludedPaths.Count > 0)
             sourceEntries = sourceEntries.Where(entry => !_excludedPaths.Contains(entry.Path)).ToArray();
         foreach (var entry in OrderEntries(sourceEntries))
@@ -362,7 +375,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
                 SelectIndex(index);
             else
                 ClearSelection();
-            if (index >= 0 && NativeShellContextMenu.TryShowIsolated(Handle, _entries[index].Path, _lastContextMenuScreenPoint))
+            if (index >= 0 && NativeShellContextMenu.TryShowIsolated(Handle, _entries[index].Path, _lastContextMenuScreenPoint, SchedulePhysicalRefresh))
                 return;
             _menu?.Show(this, e.Location);
             return;
@@ -381,6 +394,15 @@ internal sealed class DesktopLayeredOverlayForm : Form
         ClearSelection();
         ReleaseCapture();
         SendMessage(Handle, 0x00A1, (IntPtr)2, IntPtr.Zero);
+    }
+
+    private void HandleMouseUp(object? sender, MouseEventArgs e)
+    {
+        if (e.Button != MouseButtons.Left) return;
+        var index = GetEntryIndexAt(e.Location);
+        if (_dragCandidateIndex >= 0 && index == _dragCandidateIndex)
+            StartShortcutKeyHost(PointToScreen(e.Location));
+        _dragCandidateIndex = -1;
     }
 
     private void HandleMouseDoubleClick(object? sender, MouseEventArgs e)
@@ -426,8 +448,8 @@ internal sealed class DesktopLayeredOverlayForm : Form
 
     private void ClearSelection()
     {
-        if (_selectedIndex < 0)
-            return;
+        CloseShortcutKeyHost();
+        if (_selectedIndex < 0) return;
         _selectedIndex = -1;
         RenderLayer();
     }
@@ -727,9 +749,12 @@ internal sealed class DesktopLayeredOverlayForm : Form
 
     private void DrawFolderDropHint(Graphics graphics)
     {
-        if (_dropFolderIndex < 0 || _dropFolderIndex >= _entries.Count)
-            return;
-        var text = _dropIsArchive ? $"→ 加入壓縮檔 {_entries[_dropFolderIndex].Name}" : $"→ {(_dropIsCopy ? "複製至" : "移動至")} {_entries[_dropFolderIndex].Name}";
+        string? text = null;
+        if (_dropFolderIndex >= 0 && _dropFolderIndex < _entries.Count)
+            text = _dropIsRecycleBin ? "→ 移至資源回收筒" : _dropIsArchive ? $"→ 加入壓縮檔 {_entries[_dropFolderIndex].Name}" : $"→ {(_dropIsCopy ? "複製至" : "移動至")} {_entries[_dropFolderIndex].Name}";
+        else if (_dropIsCrossListReference)
+            text = "→ 加入此清單（原始位置不變）";
+        if (text is null) return;
         using var font = new Font("Microsoft JhengHei UI", 10F);
         var size = TextRenderer.MeasureText(text, font, Size.Empty, TextFormatFlags.NoPadding);
         var x = Math.Clamp(_lastDragClientPoint.X + 18, 4, Math.Max(4, ClientSize.Width - size.Width - 22));
@@ -945,10 +970,111 @@ internal sealed class DesktopLayeredOverlayForm : Form
 
     private void CopySelectedToClipboard()
     {
-        if (SelectedEntry is not { } entry || entry.IsVirtual)
-            return;
-        var files = new StringCollection { entry.Path };
-        Clipboard.SetFileDropList(files);
+        CopySelectedToClipboard(cut: false);
+    }
+
+    private void CopySelectedToClipboard(bool cut)
+    {
+        if (SelectedEntry is not { } entry || entry.IsVirtual) return;
+        try
+        {
+            var data = new DataObject(); var files = new StringCollection { entry.Path }; data.SetFileDropList(files);
+            data.SetData("Preferred DropEffect", new MemoryStream(BitConverter.GetBytes(cut ? 2 : 1)));
+            Clipboard.SetDataObject(data, true);
+        }
+        catch (ExternalException ex)
+        {
+            MessageBox.Show(ex.Message, "無法複製", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    private void PasteClipboardItems()
+    {
+        try
+        {
+            if (!Clipboard.ContainsFileDropList()) return;
+            var paths = Clipboard.GetFileDropList().Cast<string>().Where(path => File.Exists(path) || Directory.Exists(path)).ToArray();
+            if (paths.Length == 0) return;
+            if (_customList is not null)
+            {
+                AddReferencePaths(paths);
+                Clipboard.Clear();
+                return;
+            }
+            var move = GetClipboardPreferredDropEffect() == DragDropEffects.Move;
+            TransferPaths(paths, _folderPath ?? Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), copy: !move);
+            PhysicalPathsChanged?.Invoke(this, EventArgs.Empty);
+            ReloadItems();
+            if (move) Clipboard.Clear();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or OperationCanceledException or ExternalException)
+        {
+            MessageBox.Show(ex.Message, "無法貼上", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    private static DragDropEffects GetClipboardPreferredDropEffect()
+    {
+        try
+        {
+            if (Clipboard.GetDataObject()?.GetData("Preferred DropEffect") is MemoryStream stream)
+            {
+                var bytes = stream.ToArray();
+                if (bytes.Length >= 4) return (DragDropEffects)BitConverter.ToInt32(bytes, 0);
+            }
+        }
+        catch (ExternalException) { }
+        return DragDropEffects.Copy;
+    }
+
+    private void DeleteSelectedToRecycleBin()
+    {
+        if (SelectedEntry is not { IsVirtual: false } entry) return;
+        try
+        {
+            MovePathsToRecycleBin([entry.Path]);
+            if (_customList is not null)
+            {
+                _customList.Paths.RemoveAll(path => string.Equals(path, entry.Path, StringComparison.OrdinalIgnoreCase));
+                CustomPathsChanged?.Invoke(this, EventArgs.Empty);
+            }
+            else if (_referencePaths.Remove(entry.Path)) OverlayOrderSettings.SaveReferencePaths(SettingsIdentity, _referencePaths);
+            _selectedIndex = -1;
+            ReloadItems();
+            PhysicalPathsChanged?.Invoke(this, EventArgs.Empty);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or OperationCanceledException)
+        {
+            MessageBox.Show(ex.Message, "無法移至資源回收筒", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    private void StartShortcutKeyHost(Point screenPoint)
+    {
+        if (!IsHandleCreated || IsDisposed) return;
+        BeginInvoke(() =>
+        {
+            _shortcutKeyHost?.Close(); _shortcutKeyHost?.Dispose();
+            var host = new ShortcutKeyHost(screenPoint, _isFloating); _shortcutKeyHost = host;
+            host.ShortcutPressed += (key, control) =>
+            {
+                if (control && key == Keys.C) CopySelectedToClipboard(cut: false);
+                else if (control && key == Keys.X) CopySelectedToClipboard(cut: true);
+                else if (control && key == Keys.V) PasteClipboardItems();
+                else if (key == Keys.Delete) DeleteSelectedToRecycleBin();
+            };
+            host.FormClosed += (_, _) => { if (ReferenceEquals(_shortcutKeyHost, host)) _shortcutKeyHost = null; host.Dispose(); };
+            host.Show();
+        });
+    }
+
+    private void CloseShortcutKeyHost()
+    {
+        var host = _shortcutKeyHost;
+        _shortcutKeyHost = null;
+        if (host is null) return;
+        host.Close();
+        host.Dispose();
     }
 
     private void BeginItemDrag(int index)
@@ -961,7 +1087,9 @@ internal sealed class DesktopLayeredOverlayForm : Form
         var data = new DataObject();
         if (!CanBeginItemDrag(_entries[index].IsVirtual, _entries[index].Path))
             return;
-        data.SetData("DesktopListTool.SourcePath", _entries[index].Path);
+        var draggedPath = _entries[index].Path;
+        data.SetData("DesktopListTool.SourcePath", draggedPath);
+        data.SetData("DesktopListTool.SourceListIdentity", DragIdentity);
         var effect = DoDragDrop(data, DragDropEffects.Move | DragDropEffects.Copy);
         if (effect == DragDropEffects.None && _dragOriginalOrder is not null)
         {
@@ -973,12 +1101,12 @@ internal sealed class DesktopLayeredOverlayForm : Form
         var dropPoint = Cursor.Position;
         ClearDropFeedback();
         if (effect == DragDropEffects.None && !_dragCancelled && !Bounds.Contains(dropPoint) && IsDesktopSurfaceAt(dropPoint))
-            CreateCustomListRequested?.Invoke(this, new CustomListRequestedEventArgs(_entries[index].Path, dropPoint));
+            CreateCustomListRequested?.Invoke(this, new CustomListRequestedEventArgs(draggedPath, dropPoint));
         if (effect != DragDropEffects.None)
         {
             if (_customList is not null && effect == DragDropEffects.Move && !Bounds.Contains(dropPoint))
             {
-                _customList.Paths.RemoveAll(path => string.Equals(path, _entries[index].Path, StringComparison.OrdinalIgnoreCase));
+                _customList.Paths.RemoveAll(path => string.Equals(path, draggedPath, StringComparison.OrdinalIgnoreCase));
                 var becameEmpty = _customList.Paths.Count == 0;
                 CustomPathsChanged?.Invoke(this, EventArgs.Empty);
                 if (becameEmpty) { CloseListRequested?.Invoke(this, EventArgs.Empty); return; }
@@ -1005,6 +1133,10 @@ internal sealed class DesktopLayeredOverlayForm : Form
     internal static bool CanBeginItemDrag(bool isVirtual, string path) =>
         !isVirtual || string.Equals(path, DesktopOverlayEntry.RecycleBinPath, StringComparison.OrdinalIgnoreCase);
 
+    internal static bool IsCrossListReferenceDrop(string? sourceIdentity, string targetIdentity, bool hasPhysicalTarget) =>
+        !hasPhysicalTarget && !string.IsNullOrWhiteSpace(sourceIdentity) &&
+        !string.Equals(sourceIdentity, targetIdentity, StringComparison.Ordinal);
+
     private void HandleDragEnter(object? sender, DragEventArgs e) => UpdateDragTarget(e);
 
     private void HandleDragOver(object? sender, DragEventArgs e) => UpdateDragTarget(e);
@@ -1020,25 +1152,29 @@ internal sealed class DesktopLayeredOverlayForm : Form
         _lastDragClientPoint = client;
         var index = GetEntryIndexAt(client);
         var sourcePath = e.Data.GetData("DesktopListTool.SourcePath") as string;
+        var sourceListIdentity = e.Data.GetData("DesktopListTool.SourceListIdentity") as string;
         var sourceIsVirtual = string.Equals(sourcePath, DesktopOverlayEntry.RecycleBinPath, StringComparison.OrdinalIgnoreCase);
-        _dropTargetPath = null; _dropIsArchive = false; _dropFolderIndex = -1;
-        if (!sourceIsVirtual && index >= 0 && !_entries[index].IsVirtual && !string.Equals(sourcePath, _entries[index].Path, StringComparison.OrdinalIgnoreCase) && IsFolderDropZone(client, index))
+        _dropTargetPath = null; _dropIsArchive = false; _dropIsRecycleBin = false; _dropIsCrossListReference = false; _dropFolderIndex = -1;
+        if (!sourceIsVirtual && index >= 0 && !string.Equals(sourcePath, _entries[index].Path, StringComparison.OrdinalIgnoreCase) && IsFolderDropZone(client, index))
         {
             var candidate = _entries[index];
-            if (candidate.IsDirectory) _dropTargetPath = candidate.Path;
+            if (candidate.IsVirtual && string.Equals(candidate.Path, DesktopOverlayEntry.RecycleBinPath, StringComparison.OrdinalIgnoreCase)) { _dropTargetPath = candidate.Path; _dropIsRecycleBin = true; }
+            else if (candidate.IsDirectory) _dropTargetPath = candidate.Path;
             else if (NativeShellDropTarget.TryResolveFolderShortcut(candidate.Path, out var shortcutFolder)) _dropTargetPath = shortcutFolder;
             else if (NativeShellDropTarget.IsArchivePath(candidate.Path)) { _dropTargetPath = candidate.Path; _dropIsArchive = true; }
             if (_dropTargetPath is not null) _dropFolderIndex = index;
         }
         _dropInsertIndex = _dropFolderIndex >= 0 ? -1 : GetInsertionIndex(client);
         _dropIsCopy = (e.KeyState & 8) != 0;
+        _dropIsCrossListReference = IsCrossListReferenceDrop(sourceListIdentity, DragIdentity, _dropFolderIndex >= 0);
         if (sourceIsVirtual && _customList is null && !_entries.Any(value => string.Equals(value.Path, sourcePath, StringComparison.OrdinalIgnoreCase)))
         {
             e.Effect = DragDropEffects.None;
             RenderLayer();
             return;
         }
-        e.Effect = _dropIsArchive || _dropIsCopy ? DragDropEffects.Copy : DragDropEffects.Move;
+        e.Effect = _dropIsRecycleBin ? DragDropEffects.Move :
+            _dropIsArchive || _dropIsCrossListReference || _dropIsCopy ? DragDropEffects.Copy : DragDropEffects.Move;
         RenderLayer();
     }
 
@@ -1106,11 +1242,25 @@ internal sealed class DesktopLayeredOverlayForm : Form
             if (_dropFolderIndex >= 0)
             {
                 if (_dropTargetPath is null) return;
-                if (_dropIsArchive)
+                if (_dropIsRecycleBin)
+                {
+                    MovePathsToRecycleBin(paths);
+                    PhysicalPathsChanged?.Invoke(this, EventArgs.Empty);
+                }
+                else if (_dropIsArchive)
                 {
                     if (!NativeShellDropTarget.TryDropIsolated(_dropTargetPath, paths, e.Effect == DragDropEffects.Copy)) throw new IOException("無法啟動壓縮檔的系統拖放處理程式。");
+                    PhysicalPathsChanged?.Invoke(this, EventArgs.Empty);
                 }
-                else TransferPaths(paths, _dropTargetPath, e.Effect == DragDropEffects.Copy);
+                else
+                {
+                    TransferPaths(paths, _dropTargetPath, e.Effect == DragDropEffects.Copy);
+                    PhysicalPathsChanged?.Invoke(this, EventArgs.Empty);
+                }
+            }
+            else if (_dropIsCrossListReference)
+            {
+                AddReferencePaths(paths);
             }
             else if (paths.Length == 1 && e.Data!.GetDataPresent("DesktopListTool.SourcePath") &&
                      _entries.Any(item => string.Equals(item.Path, paths[0], StringComparison.OrdinalIgnoreCase)))
@@ -1137,9 +1287,10 @@ internal sealed class DesktopLayeredOverlayForm : Form
             else
             {
                 TransferPaths(paths, _folderPath ?? Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), e.Effect == DragDropEffects.Copy);
+                PhysicalPathsChanged?.Invoke(this, EventArgs.Empty);
             }
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or OperationCanceledException or InvalidOperationException)
         {
             MessageBox.Show(ex.Message, "無法完成拖曳", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
@@ -1170,6 +1321,34 @@ internal sealed class DesktopLayeredOverlayForm : Form
             }
             else if (copy) File.Copy(source, destination);
             else MovePath(source, destination, isDirectory: false, sameVolumeResolver);
+        }
+    }
+
+    private void AddReferencePaths(IEnumerable<string> paths)
+    {
+        if (_customList is not null)
+        {
+            foreach (var path in paths.Where(path => !_customList.Paths.Contains(path, StringComparer.OrdinalIgnoreCase))) _customList.Paths.Add(path);
+            CustomPathsChanged?.Invoke(this, EventArgs.Empty);
+        }
+        else
+        {
+            foreach (var path in paths) _referencePaths.Add(path);
+            OverlayOrderSettings.SaveReferencePaths(SettingsIdentity, _referencePaths);
+        }
+        ReloadItems();
+    }
+
+    internal void AddReferencePathsForTest(IEnumerable<string> paths) => AddReferencePaths(paths);
+
+    internal static void MovePathsToRecycleBin(IEnumerable<string> paths)
+    {
+        foreach (var path in paths.Where(value => !string.Equals(value, DesktopOverlayEntry.RecycleBinPath, StringComparison.OrdinalIgnoreCase)))
+        {
+            if (Directory.Exists(path))
+                Microsoft.VisualBasic.FileIO.FileSystem.DeleteDirectory(path, Microsoft.VisualBasic.FileIO.UIOption.OnlyErrorDialogs, Microsoft.VisualBasic.FileIO.RecycleOption.SendToRecycleBin);
+            else if (File.Exists(path))
+                Microsoft.VisualBasic.FileIO.FileSystem.DeleteFile(path, Microsoft.VisualBasic.FileIO.UIOption.OnlyErrorDialogs, Microsoft.VisualBasic.FileIO.RecycleOption.SendToRecycleBin);
         }
     }
 
@@ -1234,6 +1413,8 @@ internal sealed class DesktopLayeredOverlayForm : Form
         _dropFolderIndex = -1;
         _dropTargetPath = null;
         _dropIsArchive = false;
+        _dropIsRecycleBin = false;
+        _dropIsCrossListReference = false;
         _dropInsertIndex = -1;
         _dropIsCopy = false;
         if (IsHandleCreated) RenderLayer();
@@ -1273,6 +1454,21 @@ internal sealed class DesktopLayeredOverlayForm : Form
     {
         if (IsDisposed || Disposing || !IsHandleCreated) return;
         try { BeginInvoke(ReloadItems); }
+        catch (ObjectDisposedException) { }
+        catch (InvalidOperationException) { }
+    }
+
+    private void SchedulePhysicalRefresh()
+    {
+        if (IsDisposed || Disposing || !IsHandleCreated) return;
+        try
+        {
+            BeginInvoke(() =>
+            {
+                ReloadItems();
+                PhysicalPathsChanged?.Invoke(this, EventArgs.Empty);
+            });
+        }
         catch (ObjectDisposedException) { }
         catch (InvalidOperationException) { }
     }
@@ -1413,6 +1609,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
             _personalWatcher?.Dispose();
             _publicWatcher?.Dispose();
             _menu?.Dispose();
+            CloseShortcutKeyHost();
             _itemFont?.Dispose();
             SystemEvents.UserPreferenceChanged -= HandleUserPreferenceChanged;
             foreach (var entry in _entries)

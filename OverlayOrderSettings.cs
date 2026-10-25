@@ -78,4 +78,24 @@ internal static class OverlayOrderSettings
         }
         catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException) { }
     }
+
+    public static IReadOnlyList<string> LoadReferencePaths(string? identity)
+    {
+        try
+        {
+            using var key = Registry.CurrentUser.OpenSubKey(OverlaySettings.GetSettingsKey(identity));
+            return key?.GetValue("ReferencePaths") as string[] ?? [];
+        }
+        catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException) { return []; }
+    }
+
+    public static void SaveReferencePaths(string? identity, IEnumerable<string> paths)
+    {
+        try
+        {
+            using var key = Registry.CurrentUser.CreateSubKey(OverlaySettings.GetSettingsKey(identity));
+            key.SetValue("ReferencePaths", paths.Distinct(StringComparer.OrdinalIgnoreCase).ToArray(), RegistryValueKind.MultiString);
+        }
+        catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException) { }
+    }
 }

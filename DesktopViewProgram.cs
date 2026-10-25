@@ -375,6 +375,14 @@ internal sealed class DesktopViewApplicationContext : ApplicationContext
         overlay.PlacementPreview = PreviewPlacement;
         overlay.PlacementCompleted = CompletePlacement;
         overlay.CheckUpdateRequested += async (_, _) => await CheckForUpdatesAsync(interactive: true);
+        overlay.PhysicalPathsChanged += (_, _) => RefreshAllListItems();
+    }
+
+    private void RefreshAllListItems()
+    {
+        foreach (var list in AllListOverlays().Where(value => !value.IsDisposed).ToArray())
+            list.RefreshItems();
+        RefreshDetachedDesktopItems();
     }
 
     private async Task CheckForUpdatesAsync(bool interactive)
@@ -1295,13 +1303,19 @@ internal static class SmokeTests
                     var savedStyle = new OverlayStyleOptions { BackgroundColor = Color.MediumPurple, BackgroundOpacity = 123, GradientOpacity = 77, FontSize = 13F, LineHeight = 44, HorizontalSpacing = 37 };
                     OverlayAppearanceSettings.SaveStyle(stateIdentity, savedStyle);
                     OverlayOrderSettings.SaveDisplayMode(stateIdentity, OverlayDisplayMode.Icons);
+                    OverlayOrderSettings.SaveReferencePaths(stateIdentity, [@"C:\DesktopListTool-Smoke\reference.txt"]);
                     var loadedStyle = OverlayAppearanceSettings.LoadStyle(stateIdentity, new OverlayStyleOptions());
                     var loadedBounds = OverlaySettings.LoadBounds(stateIdentity, Rectangle.Empty); var loadedFloating = OverlaySettings.LoadFloating(stateIdentity);
                     Assert(loadedBounds == sampleBounds && loadedFloating, $"list position and floating state persist for current display layout ({loadedBounds}, floating={loadedFloating})");
                     Assert(loadedStyle.BackgroundColor.ToArgb() == Color.MediumPurple.ToArgb() && loadedStyle.BackgroundOpacity == 123 && loadedStyle.GradientOpacity == 77 && loadedStyle.LineHeight == 44 && loadedStyle.HorizontalSpacing == 37, "list style including horizontal spacing persists for current display layout");
                     Assert(OverlayOrderSettings.LoadDisplayMode(stateIdentity) == OverlayDisplayMode.Icons, "per-list icon display mode persists for current display layout");
+                    Assert(OverlayOrderSettings.LoadReferencePaths(stateIdentity).SequenceEqual([@"C:\DesktopListTool-Smoke\reference.txt"], StringComparer.OrdinalIgnoreCase), "cross-list reference paths persist for current display layout");
                 }
-                finally { Registry.CurrentUser.DeleteSubKeyTree(OverlaySettings.GetLegacySettingsKey(stateIdentity), false); }
+                finally
+                {
+                    Registry.CurrentUser.DeleteSubKeyTree(OverlaySettings.GetSettingsKey(stateIdentity), false);
+                    Registry.CurrentUser.DeleteSubKeyTree(OverlaySettings.GetLegacySettingsKey(stateIdentity), false);
+                }
             }
             var placed = DesktopViewApplicationContext.FindFreeListPlacement(
                 new Rectangle(20, 20, 360, 240), workArea, [new Rectangle(0, 0, 500, 600)]);
@@ -1317,6 +1331,12 @@ internal static class SmokeTests
             Assert(desktopEntries.Any(entry => entry.IsVirtual && entry.Path == DesktopOverlayEntry.RecycleBinPath), "recycle bin appears in desktop list");
             Assert(DesktopLayeredOverlayForm.CanBeginItemDrag(true, DesktopOverlayEntry.RecycleBinPath) &&
                 !DesktopLayeredOverlayForm.CanBeginItemDrag(true, "shell:unsupported"), "recycle bin alone may detach into a reference list without enabling arbitrary virtual-item moves");
+            Assert(DesktopLayeredOverlayForm.IsCrossListReferenceDrop("custom:source", "custom:target", hasPhysicalTarget: false) &&
+                !DesktopLayeredOverlayForm.IsCrossListReferenceDrop("custom:source", "custom:target", hasPhysicalTarget: true) &&
+                !DesktopLayeredOverlayForm.IsCrossListReferenceDrop("custom:same", "custom:same", hasPhysicalTarget: false), "cross-list blank drops preserve the source while physical targets take priority");
+            Assert(ShortcutKeyHost.IsSupportedShortcut(Keys.C, control: true) && ShortcutKeyHost.IsSupportedShortcut(Keys.X, control: true) &&
+                ShortcutKeyHost.IsSupportedShortcut(Keys.V, control: true) && ShortcutKeyHost.IsSupportedShortcut(Keys.Delete, control: false) &&
+                !ShortcutKeyHost.IsSupportedShortcut(Keys.Delete, control: true), "selected list items support copy, cut, paste and delete shortcuts");
             using (var recycleIcon = DesktopOverlayEntry.GetIcon(DesktopOverlayEntry.RecycleBinPath, true))
                 Assert(recycleIcon is not null, "recycle bin icon available");
             Assert(DesktopOverlayEntry.LoadPaths([DesktopOverlayEntry.RecycleBinPath]).Single().IsVirtual, "custom list can contain the recycle bin reference");
@@ -1368,6 +1388,11 @@ internal static class SmokeTests
                 Assert(detachedOverlay.OwnsScreenPointForTest(blankPoint), "detached list transparent blank area receives right-click and move input");
                 detachedOverlay.ToggleDisplayModeForTest();
                 Assert(detachedOverlay.DisplayModeForTest == OverlayDisplayMode.Icons && detachedOverlay.RequiredContentHeightForTest(wideWidth) >= detachedOverlay.MinimumSize.Height, "desktop icon mode remains inside the resizable custom-list frame");
+                var fourthReference = Path.Combine(referenceRoot, "fourth.txt"); File.WriteAllText(fourthReference, "fourth");
+                detachedOverlay.AddReferencePathsForTest([fourthReference]);
+                Assert(detachedOverlay.EntryPaths.Contains(fourthReference, StringComparer.OrdinalIgnoreCase) && File.Exists(fourthReference), "cross-list drops add a reference without moving the original file");
+                File.Delete(thirdReference); detachedOverlay.RefreshItems();
+                Assert(!detachedOverlay.EntryPaths.Contains(thirdReference, StringComparer.OrdinalIgnoreCase), "a physical deletion refreshes the list immediately without a manual reload command");
                 detachedOverlay.Hide();
             }
             finally { Environment.SetEnvironmentVariable("DESKTOP_LIST_QA_FLOATING", previousFloatingQa); }

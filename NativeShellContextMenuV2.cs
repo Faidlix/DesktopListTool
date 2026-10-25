@@ -1,5 +1,5 @@
 // 功能：在隔離輔助程序中顯示檔案總管原生右鍵選單，並轉送 Shell 延伸選單訊息避免空白或閃退。
-// 使用：主視窗呼叫 TryShowIsolated；--shell-menu 輔助程序以自己的隱藏擁有者視窗呼叫 TryShow。
+// 使用：主視窗呼叫 TryShowIsolated，可在原生選單程序結束時刷新清單；輔助程序再呼叫 TryShow。
 // 設定：僅接受存在的本機檔案或資料夾；主程序不直接載入第三方 Shell 擴充套件。
 
 using System.Diagnostics;
@@ -9,7 +9,7 @@ namespace DesktopListTool;
 
 internal static class NativeShellContextMenu
 {
-    public static bool TryShowIsolated(IntPtr owner, string path, Point screenPoint)
+    public static bool TryShowIsolated(IntPtr owner, string path, Point screenPoint, Action? completed = null)
     {
         if (!File.Exists(path) && !Directory.Exists(path)) return false;
         var executable = Environment.ProcessPath;
@@ -18,7 +18,18 @@ internal static class NativeShellContextMenu
         {
             var start = new ProcessStartInfo(executable) { UseShellExecute = false, CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden };
             start.ArgumentList.Add("--shell-menu"); start.ArgumentList.Add(path); start.ArgumentList.Add(screenPoint.X.ToString()); start.ArgumentList.Add(screenPoint.Y.ToString());
-            Process.Start(start); return true;
+            var process = Process.Start(start);
+            if (process is null) return false;
+            if (completed is not null)
+            {
+                _ = Task.Run(async () =>
+                {
+                    try { await process.WaitForExitAsync(); completed(); }
+                    finally { process.Dispose(); }
+                });
+            }
+            else process.Dispose();
+            return true;
         }
         catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception) { return false; }
     }
