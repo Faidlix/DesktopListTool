@@ -1,3 +1,7 @@
+// 功能：管理桌面清單、資料夾清單、單項清單與便籤，保存配置並協調非懸浮物件的避讓位置。
+// 使用：由 --list compact|standard|large 啟動；新建物件尋找空位，手動拖曳時才暫時擠開衝突物件。
+// 設定：內容、位置、樣式與懸浮狀態依單／多螢幕配置保存於目前使用者設定。
+
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Text.Json;
@@ -135,6 +139,9 @@ internal sealed class DesktopViewApplicationContext : ApplicationContext
     private readonly EventWaitHandle[] _commandEvents;
     private readonly RegisteredWaitHandle[] _registeredWaits;
     private readonly DesktopBlankClickMonitor _blankClickMonitor;
+    private readonly Dictionary<Form, Rectangle> _temporaryDisplacementOrigins = [];
+    private Form? _activePlacementSource;
+    private Rectangle _activePlacementOrigin;
 
     private readonly ToolStripMenuItem _startupItem;
     private bool _checkingForUpdate;
@@ -310,7 +317,11 @@ internal sealed class DesktopViewApplicationContext : ApplicationContext
         AttachPlacementAndCustomListEvents(overlay);
         overlay.FormClosed += (_, _) => _customOverlays.Remove(overlay);
         _customOverlays.Add(overlay);
-        if (save) overlay.SetBoundsWithoutSaving(FindFreePlacement(overlay.Bounds, overlay));
+        if (save)
+        {
+            overlay.FitToContentMinimum();
+            overlay.SetBoundsWithoutSaving(FindFreePlacement(overlay.Bounds, overlay));
+        }
         OverlaySettings.SaveBounds($"custom:{data.Id:N}", overlay.Bounds);
         overlay.Show();
         if (save) CustomListSettings.Save(_customLists);
@@ -336,6 +347,8 @@ internal sealed class DesktopViewApplicationContext : ApplicationContext
     {
         overlay.CreateCustomListRequested += (_, e) => CreateCustomList(e.Path, e.ScreenLocation);
         overlay.ResolvePlacement = (sender, candidate) => FindFreePlacement(candidate, sender);
+        overlay.PlacementPreview = PreviewPlacement;
+        overlay.PlacementCompleted = CompletePlacement;
         overlay.CheckUpdateRequested += async (_, _) => await CheckForUpdatesAsync(interactive: true);
     }
 
@@ -366,15 +379,102 @@ internal sealed class DesktopViewApplicationContext : ApplicationContext
         catch (InvalidOperationException) { }
     }
 
-    private Rectangle FindFreePlacement(Rectangle candidate, DesktopLayeredOverlayForm self)
+    private Rectangle FindFreePlacement(Rectangle candidate, Form? self)
     {
-        if (self.IsFloating)
+        if (self is not null && IsFloatingSurface(self))
             return DesktopLayeredOverlayForm.ConstrainRectangle(candidate, Screen.FromRectangle(candidate).WorkingArea);
         var workArea = Screen.FromRectangle(candidate).WorkingArea;
         candidate = DesktopLayeredOverlayForm.ConstrainRectangle(candidate, workArea);
-        var occupied = AllListOverlays().Where(value => value != self && !value.IsFloating && !value.IsDisposed)
+        var occupied = AllDesktopSurfaces().Where(value => value != self && !IsFloatingSurface(value) && !value.IsDisposed)
             .Select(value => value.Bounds).ToArray();
         return FindFreeListPlacement(candidate, workArea, occupied);
+    }
+
+    private IEnumerable<Form> AllDesktopSurfaces()
+    {
+        foreach (var overlay in AllListOverlays()) yield return overlay;
+        foreach (var note in _noteForms) yield return note;
+    }
+
+    private static bool IsFloatingSurface(Form form) => form switch
+    {
+        DesktopLayeredOverlayForm overlay => overlay.IsFloating,
+        DesktopLayeredNoteForm note => note.IsFloating,
+        _ => false
+    };
+
+    private static void SetSurfaceBoundsWithoutSaving(Form form, Rectangle bounds)
+    {
+        if (form is DesktopLayeredOverlayForm overlay) overlay.SetBoundsWithoutSaving(bounds);
+        else if (form is DesktopLayeredNoteForm note) note.SetBoundsWithoutSaving(bounds);
+    }
+
+    private void PreviewPlacement(Form source, Rectangle candidate)
+    {
+        if (IsFloatingSurface(source)) return;
+        if (_activePlacementSource != source)
+        {
+            RestoreTemporaryDisplacements();
+            _activePlacementSource = source;
+            _activePlacementOrigin = source.Bounds;
+        }
+        else
+        {
+            RestoreTemporaryDisplacements(clearTransaction: false);
+        }
+
+        var surfaces = AllDesktopSurfaces()
+            .Where(value => value != source && !value.IsDisposed && !IsFloatingSurface(value))
+            .ToArray();
+        var originalBounds = surfaces.Select(value => value.Bounds).ToArray();
+        var planned = PlanTemporaryDisplacements(candidate, Screen.FromRectangle(candidate).WorkingArea, originalBounds);
+        foreach (var (index, bounds) in planned)
+        {
+            var form = surfaces[index];
+            _temporaryDisplacementOrigins[form] = originalBounds[index];
+            SetSurfaceBoundsWithoutSaving(form, bounds);
+        }
+    }
+
+    private void CompletePlacement(Form source)
+    {
+        if (_activePlacementSource != source) return;
+        if (source.Bounds == _activePlacementOrigin)
+        {
+            RestoreTemporaryDisplacements();
+            return;
+        }
+        foreach (var form in _temporaryDisplacementOrigins.Keys.Where(value => !value.IsDisposed))
+        {
+            if (form is DesktopLayeredOverlayForm overlay) overlay.PersistState();
+            else if (form is DesktopLayeredNoteForm note) note.PersistState();
+        }
+        _temporaryDisplacementOrigins.Clear();
+        _activePlacementSource = null;
+        SaveNotes();
+    }
+
+    private void RestoreTemporaryDisplacements(bool clearTransaction = true)
+    {
+        foreach (var (form, bounds) in _temporaryDisplacementOrigins.ToArray())
+            if (!form.IsDisposed) SetSurfaceBoundsWithoutSaving(form, bounds);
+        _temporaryDisplacementOrigins.Clear();
+        if (clearTransaction) _activePlacementSource = null;
+    }
+
+    internal static Dictionary<int, Rectangle> PlanTemporaryDisplacements(Rectangle moving, Rectangle workArea, IReadOnlyList<Rectangle> stationary)
+    {
+        var current = stationary.ToArray();
+        var result = new Dictionary<int, Rectangle>();
+        for (var index = 0; index < current.Length; index++)
+        {
+            if (!current[index].IntersectsWith(moving)) continue;
+            var occupied = current.Where((_, otherIndex) => otherIndex != index).Append(moving).ToArray();
+            var target = FindFreeListPlacement(current[index], workArea, occupied);
+            current[index] = target;
+            if (target != stationary[index]) result[index] = target;
+        }
+        return result;
     }
 
     internal static Rectangle FindFreeListPlacement(Rectangle candidate, Rectangle workArea, IReadOnlyCollection<Rectangle> occupied)
@@ -430,7 +530,7 @@ internal sealed class DesktopViewApplicationContext : ApplicationContext
             Items = editor.ChecklistItems.ToList(),
             Bounds = new Rectangle(screenLocation.X, screenLocation.Y, 340, 260)
         };
-        note.Bounds = DesktopLayeredOverlayForm.ConstrainRectangle(note.Bounds, Screen.FromPoint(screenLocation).WorkingArea);
+        note.Bounds = FindFreePlacement(note.Bounds, null);
         var placement = DisplayLayoutIdentity.CapturePlacement(note.Bounds);
         note.MonitorDeviceName = placement.DeviceName; note.MonitorRelativeX = placement.RelativeX; note.MonitorRelativeY = placement.RelativeY;
         _notes.Add(note);
@@ -445,6 +545,11 @@ internal sealed class DesktopViewApplicationContext : ApplicationContext
         form.DeleteRequested += (_, _) => DeleteNote(form);
         form.AddNoteRequested += (_, e) => CreateNote(e.ScreenLocation);
         form.NoteChanged += (_, _) => SaveNotes();
+        form.ResolvePlacement = (sender, candidate) => FindFreePlacement(candidate, sender);
+        form.PlacementPreview = PreviewPlacement;
+        form.PlacementCompleted = CompletePlacement;
+        form.SetBoundsWithoutSaving(FindFreePlacement(form.Bounds, form));
+        form.PersistState();
         _noteForms.Add(form);
         form.Show();
     }
@@ -1162,7 +1267,12 @@ internal static class SmokeTests
             Assert(OverlayStyleRendering.ResizeIndicatorThickness >= 10F, "rounded resize indicator is approximately scrollbar-thumb thickness");
             using (var inputHitBrush = OverlayStyleRendering.CreateInputHitBrush(Color.DarkOrange))
                 Assert(inputHitBrush.Color.A == 1, "detached list transparent surface remains mouse-interactive without becoming visible");
-            Assert(OverlayAppearanceSettings.DecodeExplorerAccentColor(0xFF2A4C91).ToArgb() == Color.FromArgb(145, 76, 42).ToArgb(), "Explorer start menu ABGR color is decoded correctly");
+            Assert(OverlayAppearanceSettings.DecodeExplorerAccentColor(0xFF2A4C91).ToArgb() == Color.FromArgb(145, 76, 42).ToArgb(), "Explorer taskbar ABGR color is decoded correctly");
+            using (var explorerAccent = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Explorer\Accent"))
+                if (explorerAccent?.GetValue("StartColorMenu") is int taskbarColor)
+                    Assert(OverlayAppearanceSettings.GetWindowsThemeColor().ToArgb() == OverlayAppearanceSettings.DecodeExplorerAccentColor(unchecked((uint)taskbarColor)).ToArgb(), "system color follows the current Explorer taskbar color");
+            Assert(DesktopLayeredOverlayForm.ShouldShowDesktopDropCursor(DragDropEffects.None, insideSource: false, overDesktop: true) &&
+                !DesktopLayeredOverlayForm.ShouldShowDesktopDropCursor(DragDropEffects.None, insideSource: false, overDesktop: false), "desktop item drag uses a move cursor only over a valid desktop surface");
             Assert(OverlaySettings.GetSettingsKey("custom:smoke").Contains(DisplayLayoutIdentity.CurrentId, StringComparison.Ordinal), "list settings are isolated by display layout");
             var currentScreen = Screen.PrimaryScreen ?? Screen.AllScreens[0];
             var sampleBounds = new Rectangle(currentScreen.WorkingArea.Left + 73, currentScreen.WorkingArea.Top + 41, 360, 220);
@@ -1186,6 +1296,11 @@ internal static class SmokeTests
             var placed = DesktopViewApplicationContext.FindFreeListPlacement(
                 new Rectangle(20, 20, 360, 240), workArea, [new Rectangle(0, 0, 500, 600)]);
             Assert(!placed.IntersectsWith(new Rectangle(0, 0, 500, 600)) && workArea.Contains(placed), "new lists avoid existing lists");
+            var movingSurface = new Rectangle(100, 100, 300, 220);
+            Rectangle[] stationarySurfaces = [new Rectangle(120, 120, 260, 180), new Rectangle(700, 120, 260, 180)];
+            var pushed = DesktopViewApplicationContext.PlanTemporaryDisplacements(movingSurface, workArea, stationarySurfaces);
+            Assert(pushed.Count == 1 && pushed.TryGetValue(0, out var pushedBounds) && !pushedBounds.IntersectsWith(movingSurface) && !pushedBounds.IntersectsWith(stationarySurfaces[1]), "manual drag temporarily pushes only the conflicting list or note");
+            Assert(DesktopViewApplicationContext.PlanTemporaryDisplacements(new Rectangle(400, 700, 200, 150), workArea, stationarySurfaces).Count == 0, "leaving the conflict area requires no displacement so original positions can be restored");
             Assert(AutoUpdateManager.IsNewerVersion(new Version(1, 0, 0), "v1.1.0", out var updateVersion) && updateVersion == new Version(1, 1, 0), "release version comparison");
 
             var desktopEntries = DesktopOverlayEntry.Load();
@@ -1204,6 +1319,9 @@ internal static class SmokeTests
             Directory.CreateDirectory(referenceRoot);
             var referenceFile = Path.Combine(referenceRoot, "original.txt");
             File.WriteAllText(referenceFile, "reference-only");
+            var secondReference = Path.Combine(referenceRoot, "second.txt");
+            var thirdReference = Path.Combine(referenceRoot, "third.txt");
+            File.WriteAllText(secondReference, "second"); File.WriteAllText(thirdReference, "third");
             var referenced = DesktopOverlayEntry.LoadPaths([referenceFile]);
             Assert(referenced.Count == 1 && File.Exists(referenceFile), "custom list references without moving source");
             Assert(NativeShellContextMenu.TryShow(IntPtr.Zero, referenceFile, Point.Empty, display: false), "native shell context menu marshaling");
@@ -1213,9 +1331,11 @@ internal static class SmokeTests
             {
                 using var detachedOverlay = new DesktopLayeredOverlayForm(ListItemSize.Standard,
                     defaultBounds: new Rectangle(currentScreen.WorkingArea.Left + 120, currentScreen.WorkingArea.Top + 120, 360, 180),
-                    customList: new CustomListData { Paths = [referenceFile] });
+                    customList: new CustomListData { Paths = [referenceFile, secondReference, thirdReference] });
+                detachedOverlay.FitToContentMinimum();
+                Assert(detachedOverlay.Size == detachedOverlay.MinimumSize && detachedOverlay.MinimumSize.Height > 100, "detached list minimum size displays all current items");
                 detachedOverlay.Show(); Application.DoEvents();
-                var blankPoint = detachedOverlay.PointToScreen(new Point(detachedOverlay.ClientSize.Width / 2, detachedOverlay.ClientSize.Height - 24));
+                var blankPoint = detachedOverlay.PointToScreen(new Point(detachedOverlay.ClientSize.Width - 24, detachedOverlay.ClientSize.Height / 2));
                 Assert(detachedOverlay.OwnsScreenPointForTest(blankPoint), "detached list transparent blank area receives right-click and move input");
                 detachedOverlay.Hide();
             }

@@ -1,6 +1,6 @@
 // 功能：以逐像素透明視窗顯示桌面項目、小圖示與可獨立保存的完整字型／間距／圓角樣式。
 // 使用：由 DesktopListTool 的 --list compact|standard|large 入口建立；位置、範圍與項目尺寸自動保存。
-// 設定：滑鼠靠近角落時以加粗圓弧或三角提示縮放；項目可拖曳排序、移入資料夾或按 Ctrl 複製。
+// 設定：自訂清單會完整容納項目；項目可拖曳排序、移入資料夾、按 Ctrl 複製，或拖到桌面建立清單。
 
 using System.Collections.Specialized;
 using System.Diagnostics;
@@ -59,6 +59,8 @@ internal sealed class DesktopLayeredOverlayForm : Form
     public event EventHandler? CustomPathsChanged;
     public event EventHandler? PlacementChanged;
     public event EventHandler? CheckUpdateRequested;
+    internal Action<Form, Rectangle>? PlacementPreview;
+    internal Action<Form>? PlacementCompleted;
     public string? FolderPath => _folderPath;
     public bool IsCustomList => _customList is not null;
     public Guid? CustomListId => _customList?.Id;
@@ -110,6 +112,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
         DragOver += HandleDragOver;
         DragLeave += (_, _) => ClearDropFeedback();
         DragDrop += HandleDragDrop;
+        GiveFeedback += HandleGiveFeedback;
         QueryContinueDrag += (_, e) => _dragCancelled |= e.EscapePressed;
 
         _personalWatcher = _customList is null ? CreateWatcher(_folderPath ?? Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory)) : null;
@@ -256,11 +259,22 @@ internal sealed class DesktopLayeredOverlayForm : Form
             : _entries.Max(entry => TextRenderer.MeasureText(entry.Name, _itemFont, Size.Empty, TextFormatFlags.NoPadding).Width);
         var screenWidth = Screen.FromRectangle(Bounds).WorkingArea.Width;
         var minimumWidth = Math.Clamp(widestText + _iconSize + 42, 220, Math.Max(220, screenWidth - 80));
-        MinimumSize = new Size(minimumWidth, _rowHeight + ContentPadding * 2);
+        var minimumHeight = _rowHeight + ContentPadding * 2;
+        if (_customList is not null && _entries.Count > 0)
+            minimumHeight = Math.Clamp(_entries.Count * _rowHeight + ContentPadding * 2, minimumHeight,
+                Math.Max(minimumHeight, Screen.FromRectangle(Bounds).WorkingArea.Height - 80));
+        MinimumSize = new Size(minimumWidth, minimumHeight);
         if (Width < minimumWidth)
             Width = minimumWidth;
         if (Height < MinimumSize.Height)
             Height = MinimumSize.Height;
+    }
+
+    internal void FitToContentMinimum()
+    {
+        if (_customList is null) return;
+        Size = MinimumSize;
+        RenderLayer();
     }
 
     private int CalculateColumnWidth()
@@ -831,6 +845,21 @@ internal sealed class DesktopLayeredOverlayForm : Form
         }
     }
 
+    private void HandleGiveFeedback(object? sender, GiveFeedbackEventArgs e)
+    {
+        var point = Cursor.Position;
+        if (ShouldShowDesktopDropCursor(e.Effect, Bounds.Contains(point), IsDesktopSurfaceAt(point)))
+        {
+            e.UseDefaultCursors = false;
+            Cursor.Current = Cursors.SizeAll;
+            return;
+        }
+        e.UseDefaultCursors = true;
+    }
+
+    internal static bool ShouldShowDesktopDropCursor(DragDropEffects effect, bool insideSource, bool overDesktop) =>
+        effect == DragDropEffects.None && !insideSource && overDesktop;
+
     private void HandleDragEnter(object? sender, DragEventArgs e) => UpdateDragTarget(e);
 
     private void HandleDragOver(object? sender, DragEventArgs e) => UpdateDragTarget(e);
@@ -1039,8 +1068,8 @@ internal sealed class DesktopLayeredOverlayForm : Form
         {
             var movingBounds = Marshal.PtrToStructure<NativeRect>(message.LParam).ToRectangle();
             movingBounds = ConstrainToScreen(movingBounds);
-            if (!_isFloating && ResolvePlacement is not null)
-                movingBounds = ResolvePlacement(this, movingBounds);
+            if (!_isFloating)
+                PlacementPreview?.Invoke(this, movingBounds);
             Marshal.StructureToPtr(NativeRect.FromRectangle(movingBounds), message.LParam, false);
         }
         if (message.Msg == WmSizing && message.LParam != IntPtr.Zero)
@@ -1055,6 +1084,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
         if (message.Msg == WmExitSizeMove)
         {
             Bounds = ConstrainToScreen(Bounds);
+            PlacementCompleted?.Invoke(this);
             OverlaySettings.SaveBounds(SettingsIdentity, Bounds);
             PlacementChanged?.Invoke(this, EventArgs.Empty);
             return;

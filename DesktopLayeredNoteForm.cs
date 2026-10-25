@@ -1,6 +1,6 @@
 // 功能：以可自訂透明樣式顯示可捲動 Markdown 與勾選事項，支援懸浮圖釘且不遮住內容。
 // 使用：空白處拖曳、本文或事項連點兩下原地編輯、滑鼠滾輪捲動；角落以加粗圓弧或三角提示縮放。
-// 設定：位置、內容、字型、行高、行距、背景與圓角由 DesktopNotesSettings 逐張保存。
+// 設定：位置、內容與樣式逐張保存；非懸浮便籤參與桌面清單的拖曳避讓，懸浮便籤允許重疊。
 
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
@@ -46,6 +46,9 @@ internal sealed class DesktopLayeredNoteForm : Form
     public event EventHandler? DeleteRequested;
     public event EventHandler? NoteChanged;
     public event EventHandler<NoteRequestedEventArgs>? AddNoteRequested;
+    internal Func<DesktopLayeredNoteForm, Rectangle, Rectangle>? ResolvePlacement;
+    internal Action<Form, Rectangle>? PlacementPreview;
+    internal Action<Form>? PlacementCompleted;
 
     public DesktopLayeredNoteForm(DesktopNoteData data)
     {
@@ -95,6 +98,7 @@ internal sealed class DesktopLayeredNoteForm : Form
     }
 
     public DesktopNoteData Data => _data;
+    public bool IsFloating => _isFloating;
     internal IReadOnlyList<string> ContextMenuLabels => _menu.Items.Cast<ToolStripItem>().Select(value => value.Text ?? "").ToArray();
     internal bool HasScrollableContent => _contentHeight > SafeContentBounds.Height;
     internal int ScrollOffset => _scrollOffset;
@@ -570,6 +574,8 @@ internal sealed class DesktopLayeredNoteForm : Form
         _data.IsFloating = false;
         _floatingItem.Text = "變成懸浮視窗";
         TopMost = false;
+        if (ResolvePlacement is not null)
+            Bounds = ResolvePlacement(this, Bounds);
         SetWindowPos(Handle, new IntPtr(1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010);
         RenderLayer();
         NoteChanged?.Invoke(this, EventArgs.Empty);
@@ -621,6 +627,8 @@ internal sealed class DesktopLayeredNoteForm : Form
         {
             var bounds = Marshal.PtrToStructure<NativeRect>(message.LParam).ToRectangle();
             var constrained = DesktopLayeredOverlayForm.ConstrainRectangle(bounds, Screen.FromRectangle(bounds).WorkingArea);
+            if (!_isFloating)
+                PlacementPreview?.Invoke(this, constrained);
             Marshal.StructureToPtr(NativeRect.FromRectangle(constrained), message.LParam, false);
         }
         if (message.Msg == WmSizing && message.LParam != IntPtr.Zero)
@@ -633,6 +641,7 @@ internal sealed class DesktopLayeredNoteForm : Form
         if (message.Msg == WmExitSizeMove)
         {
             Bounds = DesktopLayeredOverlayForm.ConstrainRectangle(Bounds, Screen.FromRectangle(Bounds).WorkingArea);
+            PlacementCompleted?.Invoke(this);
             CapturePlacement();
             NoteChanged?.Invoke(this, EventArgs.Empty);
         }
@@ -655,6 +664,12 @@ internal sealed class DesktopLayeredNoteForm : Form
         _data.MonitorDeviceName = placement.DeviceName;
         _data.MonitorRelativeX = placement.RelativeX;
         _data.MonitorRelativeY = placement.RelativeY;
+    }
+
+    internal void SetBoundsWithoutSaving(Rectangle bounds)
+    {
+        Bounds = DesktopLayeredOverlayForm.ConstrainRectangle(bounds, Screen.FromRectangle(bounds).WorkingArea);
+        RenderLayer();
     }
 
     private void ApplyLayeredBitmap(Bitmap bitmap)

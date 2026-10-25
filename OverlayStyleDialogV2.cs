@@ -475,6 +475,7 @@ internal static class OverlayAppearanceSettings
         try
         {
             using var explorer = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Explorer\Accent");
+            // StartColorMenu is the composed Start/taskbar surface color used by Explorer when taskbar accent color is enabled.
             if (explorer?.GetValue("StartColorMenu") is int start) return DecodeExplorerAccentColor(unchecked((uint)start));
             if (explorer?.GetValue("AccentColorMenu") is int accent) return DecodeExplorerAccentColor(unchecked((uint)accent));
         }
