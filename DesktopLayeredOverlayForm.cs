@@ -1,6 +1,6 @@
 // 功能：以逐像素透明視窗顯示桌面項目、小圖示與可獨立保存的完整字型／間距／圓角樣式。
 // 使用：由 DesktopListTool 的 --list compact|standard|large 入口建立；位置、範圍與項目尺寸自動保存。
-// 設定：自訂清單會完整容納項目；項目可拖曳排序、移入資料夾、按 Ctrl 複製，或拖到桌面建立清單。
+// 設定：自訂清單會完整容納項目；項目可排序、跨磁碟安全移動、按 Ctrl 複製，或拖到桌面建立清單。
 
 using System.Collections.Specialized;
 using System.Diagnostics;
@@ -979,7 +979,8 @@ internal sealed class DesktopLayeredOverlayForm : Form
         }
     }
 
-    internal static void TransferPaths(IEnumerable<string> paths, string destinationDirectory, bool copy)
+    internal static void TransferPaths(IEnumerable<string> paths, string destinationDirectory, bool copy,
+        Func<string, string, bool>? sameVolumeResolver = null)
     {
         Directory.CreateDirectory(destinationDirectory);
         foreach (var source in paths)
@@ -993,10 +994,59 @@ internal sealed class DesktopLayeredOverlayForm : Form
                 throw new IOException($"目標已存在：{destination}");
             if (Directory.Exists(source))
             {
-                if (copy) CopyDirectory(source, destination); else Directory.Move(source, destination);
+                if (copy) CopyDirectory(source, destination);
+                else MovePath(source, destination, isDirectory: true, sameVolumeResolver);
             }
-            else if (copy) File.Copy(source, destination); else File.Move(source, destination);
+            else if (copy) File.Copy(source, destination);
+            else MovePath(source, destination, isDirectory: false, sameVolumeResolver);
         }
+    }
+
+    private static void MovePath(string source, string destination, bool isDirectory,
+        Func<string, string, bool>? sameVolumeResolver)
+    {
+        var sameVolume = sameVolumeResolver?.Invoke(source, destination) ?? HaveSameVolumeRoot(source, destination);
+        if (sameVolume)
+        {
+            if (isDirectory) Directory.Move(source, destination); else File.Move(source, destination);
+            return;
+        }
+
+        var copyCompleted = false;
+        try
+        {
+            if (isDirectory) CopyDirectory(source, destination); else File.Copy(source, destination);
+            copyCompleted = true;
+            if (isDirectory) Directory.Delete(source, recursive: true); else File.Delete(source);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            if (!copyCompleted) TryRemoveIncompleteDestination(destination, isDirectory);
+            var message = copyCompleted
+                ? $"已完整複製到目的地，但無法刪除來源；目的地副本已保留：{destination}"
+                : $"跨磁碟移動失敗，來源未刪除：{source}";
+            throw new IOException(message, ex);
+        }
+    }
+
+    internal static bool HaveSameVolumeRoot(string source, string destination)
+    {
+        var sourceRoot = Path.GetPathRoot(Path.GetFullPath(source));
+        var destinationRoot = Path.GetPathRoot(Path.GetFullPath(destination));
+        return !string.IsNullOrWhiteSpace(sourceRoot) &&
+               string.Equals(sourceRoot.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                   destinationRoot?.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+                   StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static void TryRemoveIncompleteDestination(string destination, bool isDirectory)
+    {
+        try
+        {
+            if (isDirectory && Directory.Exists(destination)) Directory.Delete(destination, recursive: true);
+            else if (!isDirectory && File.Exists(destination)) File.Delete(destination);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { }
     }
 
     private static void CopyDirectory(string source, string destination)

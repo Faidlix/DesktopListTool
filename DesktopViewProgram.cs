@@ -1414,6 +1414,18 @@ internal static class SmokeTests
                 Assert(File.Exists(Path.Combine(copyTarget, "drag.txt")) && File.Exists(file), "ctrl drag copies file");
                 DesktopLayeredOverlayForm.TransferPaths([file], moveTarget, copy: false);
                 Assert(File.Exists(Path.Combine(moveTarget, "drag.txt")) && !File.Exists(file), "drag moves file");
+                Assert(DesktopLayeredOverlayForm.HaveSameVolumeRoot(@"C:\source\file.txt", @"C:\target\file.txt") &&
+                    !DesktopLayeredOverlayForm.HaveSameVolumeRoot(@"C:\source\file.txt", @"D:\target\file.txt"), "cross-volume roots are detected before moving");
+                var forcedSource = Path.Combine(transferRoot, "forced-source");
+                var forcedTarget = Path.Combine(transferRoot, "forced-target");
+                var forcedFile = Path.Combine(forcedSource, "cross-volume.txt");
+                var forcedFolder = Path.Combine(forcedSource, "cross-volume-folder");
+                Directory.CreateDirectory(forcedFolder);
+                File.WriteAllText(forcedFile, "safe-file-move");
+                File.WriteAllText(Path.Combine(forcedFolder, "nested.txt"), "safe-folder-move");
+                DesktopLayeredOverlayForm.TransferPaths([forcedFile, forcedFolder], forcedTarget, copy: false, (_, _) => false);
+                Assert(File.ReadAllText(Path.Combine(forcedTarget, "cross-volume.txt")) == "safe-file-move" && !File.Exists(forcedFile), "cross-volume file move copies completely before deleting source");
+                Assert(File.ReadAllText(Path.Combine(forcedTarget, "cross-volume-folder", "nested.txt")) == "safe-folder-move" && !Directory.Exists(forcedFolder), "cross-volume folder move copies completely before deleting source");
                 Assert(DesktopLayeredOverlayForm.IsFolderDropTarget(new Rectangle(10, 18, 300, 26), new Point(295, 30)), "folder row center accepts drop");
                 Assert(NativeShellDropTarget.IsArchivePath(Path.Combine(moveTarget, "test.zip")) == false, "missing archive is not a drop target");
                 var archive = Path.Combine(moveTarget, "test.zip"); using (System.IO.Compression.ZipFile.Open(archive, System.IO.Compression.ZipArchiveMode.Create)) { }
