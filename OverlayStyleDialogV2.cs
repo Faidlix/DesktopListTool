@@ -13,6 +13,7 @@ internal enum OverlayTextAlignment { Left, Center, Right }
 internal enum OverlayContentDistribution { Packed, Fill }
 internal enum OverlayGradientDirection { LeftToRight, TopToBottom, DiagonalDown, DiagonalUp }
 internal enum OverlayGradientMode { Single, Sandwich, Edges }
+internal enum OverlayResizeCorner { None, TopLeft, TopRight, BottomLeft, BottomRight }
 
 internal sealed class OverlayStyleOptions
 {
@@ -339,6 +340,50 @@ internal sealed class OverlayStyleDialog : Form
 
 internal static class OverlayStyleRendering
 {
+    public static OverlayResizeCorner GetResizeCorner(Point point, Size size, int range = 24)
+    {
+        var left = point.X >= -range && point.X <= range;
+        var right = point.X >= size.Width - range && point.X <= size.Width + range;
+        var top = point.Y >= -range && point.Y <= range;
+        var bottom = point.Y >= size.Height - range && point.Y <= size.Height + range;
+        if (left && top) return OverlayResizeCorner.TopLeft;
+        if (right && top) return OverlayResizeCorner.TopRight;
+        if (left && bottom) return OverlayResizeCorner.BottomLeft;
+        if (right && bottom) return OverlayResizeCorner.BottomRight;
+        return OverlayResizeCorner.None;
+    }
+
+    public static void DrawResizeIndicator(Graphics graphics, Rectangle frame, int cornerRadius, OverlayResizeCorner corner)
+    {
+        if (corner == OverlayResizeCorner.None) return;
+        var color = Color.FromArgb(245, 96, 165, 250);
+        if (cornerRadius <= 0)
+        {
+            using var brush = new SolidBrush(color); const int size = 16;
+            var points = corner switch
+            {
+                OverlayResizeCorner.TopLeft => new[] { new Point(frame.Left, frame.Top), new Point(frame.Left + size, frame.Top), new Point(frame.Left, frame.Top + size) },
+                OverlayResizeCorner.TopRight => new[] { new Point(frame.Right, frame.Top), new Point(frame.Right - size, frame.Top), new Point(frame.Right, frame.Top + size) },
+                OverlayResizeCorner.BottomLeft => new[] { new Point(frame.Left, frame.Bottom), new Point(frame.Left + size, frame.Bottom), new Point(frame.Left, frame.Bottom - size) },
+                _ => new[] { new Point(frame.Right, frame.Bottom), new Point(frame.Right - size, frame.Bottom), new Point(frame.Right, frame.Bottom - size) }
+            };
+            graphics.FillPolygon(brush, points); return;
+        }
+        var radius = Math.Min(cornerRadius, Math.Min(frame.Width, frame.Height) / 2); var diameter = radius * 2; var tail = Math.Min(34, Math.Max(14, radius));
+        using var pen = new Pen(color, 6F) { StartCap = LineCap.Round, EndCap = LineCap.Round };
+        switch (corner)
+        {
+            case OverlayResizeCorner.TopLeft:
+                graphics.DrawArc(pen, frame.Left, frame.Top, diameter, diameter, 180, 90); graphics.DrawLine(pen, frame.Left, frame.Top + radius, frame.Left, frame.Top + radius + tail); graphics.DrawLine(pen, frame.Left + radius, frame.Top, frame.Left + radius + tail, frame.Top); break;
+            case OverlayResizeCorner.TopRight:
+                graphics.DrawArc(pen, frame.Right - diameter, frame.Top, diameter, diameter, 270, 90); graphics.DrawLine(pen, frame.Right, frame.Top + radius, frame.Right, frame.Top + radius + tail); graphics.DrawLine(pen, frame.Right - radius, frame.Top, frame.Right - radius - tail, frame.Top); break;
+            case OverlayResizeCorner.BottomLeft:
+                graphics.DrawArc(pen, frame.Left, frame.Bottom - diameter, diameter, diameter, 90, 90); graphics.DrawLine(pen, frame.Left, frame.Bottom - radius, frame.Left, frame.Bottom - radius - tail); graphics.DrawLine(pen, frame.Left + radius, frame.Bottom, frame.Left + radius + tail, frame.Bottom); break;
+            case OverlayResizeCorner.BottomRight:
+                graphics.DrawArc(pen, frame.Right - diameter, frame.Bottom - diameter, diameter, diameter, 0, 90); graphics.DrawLine(pen, frame.Right, frame.Bottom - radius, frame.Right, frame.Bottom - radius - tail); graphics.DrawLine(pen, frame.Right - radius, frame.Bottom, frame.Right - radius - tail, frame.Bottom); break;
+        }
+    }
+
     public static Brush CreateBackgroundBrush(Rectangle bounds, OverlayStyleOptions style, Color primary)
     {
         var first = Color.FromArgb(style.BackgroundOpacity, primary); var second = Color.FromArgb(style.GradientOpacity, style.GradientColor);
@@ -422,10 +467,18 @@ internal static class OverlayAppearanceSettings
     {
         try
         {
+            using var explorer = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Explorer\Accent");
+            if (explorer?.GetValue("StartColorMenu") is int start) return DecodeExplorerAccentColor(unchecked((uint)start));
+            if (explorer?.GetValue("AccentColorMenu") is int accent) return DecodeExplorerAccentColor(unchecked((uint)accent));
+        }
+        catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException) { }
+        try
+        {
             using var key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\DWM");
             if (key?.GetValue("ColorizationColor") is int signed) { var value = unchecked((uint)signed); return Color.FromArgb((int)((value >> 16) & 255), (int)((value >> 8) & 255), (int)(value & 255)); }
         }
         catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException) { }
         return SystemColors.Highlight;
     }
+    internal static Color DecodeExplorerAccentColor(uint abgr) => Color.FromArgb((int)(abgr & 255), (int)((abgr >> 8) & 255), (int)((abgr >> 16) & 255));
 }

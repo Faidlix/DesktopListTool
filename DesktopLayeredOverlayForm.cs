@@ -1,6 +1,6 @@
 // 功能：以逐像素透明視窗顯示桌面項目、小圖示與可獨立保存的完整字型／間距／圓角樣式。
 // 使用：由 DesktopListTool 的 --list compact|standard|large 入口建立；位置、範圍與項目尺寸自動保存。
-// 設定：滑鼠靠近時顯示邊框；項目可拖曳排序、移入資料夾或按 Ctrl 複製，右鍵使用 Windows 原生檔案選單。
+// 設定：滑鼠靠近角落時以加粗圓弧或三角提示縮放；項目可拖曳排序、移入資料夾或按 Ctrl 複製。
 
 using System.Collections.Specialized;
 using System.Diagnostics;
@@ -32,6 +32,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
     private int _hoveredIndex = -1;
     private int _selectedIndex = -1;
     private bool _frameVisible;
+    private OverlayResizeCorner _resizeHoverCorner;
     private Color _backgroundColor;
     private byte _backgroundOpacity;
     private bool _followThemeColor;
@@ -64,6 +65,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
     public bool IsFloating => _isFloating;
     internal IReadOnlyList<string> ContextMenuLabels => _menu?.Items.Cast<ToolStripItem>().Select(value => value.Text ?? "").ToArray() ?? [];
     internal IReadOnlyList<string> EntryPaths => _entries.Select(value => value.Path).ToArray();
+    internal void SetResizeCornerForTest(OverlayResizeCorner corner) { _resizeHoverCorner = corner; _frameVisible = true; RenderLayer(); }
     internal Func<DesktopLayeredOverlayForm, Rectangle, Rectangle>? ResolvePlacement;
     private string? SettingsIdentity => _customList is null ? _folderPath : $"custom:{_customList.Id:N}";
 
@@ -276,6 +278,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
     private void HandleMouseMove(object? sender, MouseEventArgs e)
     {
         RevealFrame();
+        UpdateResizeHover(e.Location);
         SetHoveredIndex(GetEntryIndexAt(e.Location));
         if (e.Button == MouseButtons.Left && _dragCandidateIndex >= 0 &&
             Math.Abs(e.X - _dragStart.X) + Math.Abs(e.Y - _dragStart.Y) >= SystemInformation.DragSize.Width / 2)
@@ -417,9 +420,11 @@ internal sealed class DesktopLayeredOverlayForm : Form
     private void UpdateFrameVisibility()
     {
         var visible = Rectangle.Inflate(Bounds, 18, 18).Contains(Cursor.Position) || _menu?.Visible == true;
-        if (visible == _frameVisible)
+        var corner = visible ? OverlayStyleRendering.GetResizeCorner(PointToClient(Cursor.Position), ClientSize) : OverlayResizeCorner.None;
+        if (visible == _frameVisible && corner == _resizeHoverCorner)
             return;
         _frameVisible = visible;
+        _resizeHoverCorner = corner;
         if (!visible)
             _hoveredIndex = -1;
         RenderLayer();
@@ -455,9 +460,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
                 var frameBounds = new Rectangle(1, 1, ClientSize.Width - 3, ClientSize.Height - 3);
                 if (_style.CornerRadius > 0) graphics.DrawRoundedRectangle(framePen, frameBounds, Math.Min(_style.CornerRadius, Math.Min(frameBounds.Width, frameBounds.Height) / 2));
                 else graphics.DrawRectangle(framePen, frameBounds);
-                using var gripBrush = new SolidBrush(Color.FromArgb(235, 96, 165, 250));
-                graphics.FillRectangle(gripBrush, 3, 3, 10, 10); graphics.FillRectangle(gripBrush, ClientSize.Width - 13, 3, 10, 10);
-                graphics.FillRectangle(gripBrush, 3, ClientSize.Height - 13, 10, 10); graphics.FillRectangle(gripBrush, ClientSize.Width - 13, ClientSize.Height - 13, 10, 10);
+                OverlayStyleRendering.DrawResizeIndicator(graphics, frameBounds, _style.CornerRadius, _resizeHoverCorner);
             }
             if (_isFloating)
                 DrawFloatingReturnButton(graphics);
@@ -475,6 +478,13 @@ internal sealed class DesktopLayeredOverlayForm : Form
             }
         }
         ApplyLayeredBitmap(bitmap);
+    }
+
+    private void UpdateResizeHover(Point point)
+    {
+        var corner = OverlayStyleRendering.GetResizeCorner(point, ClientSize);
+        if (corner == _resizeHoverCorner) return;
+        _resizeHoverCorner = corner; RenderLayer();
     }
 
     private void DrawVerticalEntries(Graphics graphics)

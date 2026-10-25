@@ -1,5 +1,5 @@
 // 功能：以可自訂透明樣式顯示可捲動 Markdown 與勾選事項，支援懸浮圖釘且不遮住內容。
-// 使用：空白處拖曳、本文或事項連點兩下原地編輯、滑鼠滾輪捲動；四角縮放，右鍵可調整樣式或切換懸浮。
+// 使用：空白處拖曳、本文或事項連點兩下原地編輯、滑鼠滾輪捲動；角落以加粗圓弧或三角提示縮放。
 // 設定：位置、內容、字型、行高、行距、背景與圓角由 DesktopNotesSettings 逐張保存。
 
 using System.Drawing.Drawing2D;
@@ -25,6 +25,7 @@ internal sealed class DesktopLayeredNoteForm : Form
     private DesktopChecklistItem? _pendingCheckItem;
     private InlineTextEditor? _inlineEditor;
     private bool _frameVisible;
+    private OverlayResizeCorner _resizeHoverCorner;
     private Color _backgroundColor;
     private byte _backgroundOpacity;
     private bool _followTheme;
@@ -98,6 +99,7 @@ internal sealed class DesktopLayeredNoteForm : Form
     internal bool HasScrollableContent => _contentHeight > SafeContentBounds.Height;
     internal int ScrollOffset => _scrollOffset;
     internal int LastDistributionExtra => _lastDistributionExtra;
+    internal void SetResizeCornerForTest(OverlayResizeCorner corner) { _resizeHoverCorner = corner; _frameVisible = true; RenderLayer(); }
     internal void RenderForTest() { _ = Handle; RenderLayer(); }
     internal void ScrollForTest(int delta)
     {
@@ -190,6 +192,7 @@ internal sealed class DesktopLayeredNoteForm : Form
     private void HandleMouseMove(object? sender, MouseEventArgs e)
     {
         RevealFrame();
+        UpdateResizeHover(e.Location);
         if (_movePending && e.Button == MouseButtons.Left && Math.Abs(e.X - _moveStart.X) + Math.Abs(e.Y - _moveStart.Y) >= SystemInformation.DragSize.Width / 2)
         {
             _movePending = false; ReleaseCapture(); SendMessage(Handle, 0x00A1, (IntPtr)2, IntPtr.Zero); return;
@@ -243,9 +246,7 @@ internal sealed class DesktopLayeredNoteForm : Form
                 var frameBounds = new Rectangle(1, 1, ClientSize.Width - 3, ClientSize.Height - 3);
                 if (_style.CornerRadius > 0) graphics.DrawRoundedRectangle(pen, frameBounds, Math.Min(_style.CornerRadius, Math.Min(frameBounds.Width, frameBounds.Height) / 2));
                 else graphics.DrawRectangle(pen, frameBounds);
-                using var grip = new SolidBrush(Color.FromArgb(235, 96, 165, 250));
-                graphics.FillRectangle(grip, 3, 3, 10, 10); graphics.FillRectangle(grip, ClientSize.Width - 13, 3, 10, 10);
-                graphics.FillRectangle(grip, 3, ClientSize.Height - 13, 10, 10); graphics.FillRectangle(grip, ClientSize.Width - 13, ClientSize.Height - 13, 10, 10);
+                OverlayStyleRendering.DrawResizeIndicator(graphics, frameBounds, _style.CornerRadius, _resizeHoverCorner);
                 DrawScrollbar(graphics);
             }
             if (_isFloating && _frameVisible)
@@ -590,9 +591,18 @@ internal sealed class DesktopLayeredNoteForm : Form
     private void UpdateFrameVisibility()
     {
         var visible = Rectangle.Inflate(Bounds, 18, 18).Contains(Cursor.Position) || _menu.Visible;
-        if (visible == _frameVisible) return;
+        var corner = visible ? OverlayStyleRendering.GetResizeCorner(PointToClient(Cursor.Position), ClientSize) : OverlayResizeCorner.None;
+        if (visible == _frameVisible && corner == _resizeHoverCorner) return;
         _frameVisible = visible;
+        _resizeHoverCorner = corner;
         RenderLayer();
+    }
+
+    private void UpdateResizeHover(Point point)
+    {
+        var corner = OverlayStyleRendering.GetResizeCorner(point, ClientSize);
+        if (corner == _resizeHoverCorner) return;
+        _resizeHoverCorner = corner; RenderLayer();
     }
 
     private void HandleUserPreferenceChanged(object sender, UserPreferenceChangedEventArgs e)

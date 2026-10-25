@@ -1158,6 +1158,8 @@ internal static class SmokeTests
             Assert(DesktopLayeredOverlayForm.ConstrainRectangle(new Rectangle(-9, 200, 400, 500), workArea).X == 0, "left overflow constrained");
             Assert(DesktopLayeredOverlayForm.ConstrainRectangle(new Rectangle(1530, 200, 400, 500), workArea).Right == 1920, "right overflow constrained");
             Assert(DesktopLayeredOverlayForm.ConstrainRectangle(new Rectangle(400, 560, 400, 500), workArea).Bottom == 1040, "bottom overflow constrained");
+            Assert(OverlayStyleRendering.GetResizeCorner(new Point(2, 2), new Size(400, 300)) == OverlayResizeCorner.TopLeft && OverlayStyleRendering.GetResizeCorner(new Point(398, 298), new Size(400, 300)) == OverlayResizeCorner.BottomRight, "resize hover corners are detected around the frame");
+            Assert(OverlayAppearanceSettings.DecodeExplorerAccentColor(0xFF2A4C91).ToArgb() == Color.FromArgb(145, 76, 42).ToArgb(), "Explorer start menu ABGR color is decoded correctly");
             Assert(OverlaySettings.GetSettingsKey("custom:smoke").Contains(DisplayLayoutIdentity.CurrentId, StringComparison.Ordinal), "list settings are isolated by display layout");
             var currentScreen = Screen.PrimaryScreen ?? Screen.AllScreens[0];
             var sampleBounds = new Rectangle(currentScreen.WorkingArea.Left + 73, currentScreen.WorkingArea.Top + 41, 360, 220);
@@ -1314,6 +1316,7 @@ internal static class SmokeTests
                 GradientEnabled = true, GradientColorArgb = Color.DarkOrange.ToArgb(), GradientOpacity = 120, GradientDirection = OverlayGradientDirection.DiagonalDown, GradientMode = OverlayGradientMode.Edges,
                 GradientTransition = 60, TextColorArgb = Color.LightYellow.ToArgb()
             };
+            if (Environment.GetEnvironmentVariable("DESKTOP_LIST_QA_STRAIGHT_RESIZE") == "1") note.CornerRadius = 0;
             var markdown = MarkdownNoteRenderer.ParseLine("## **標題**與[連結](https://example.invalid)");
             Assert(markdown.HeadingLevel == 2 && markdown.Runs.Any(value => value.Style.HasFlag(FontStyle.Bold)) && markdown.Runs.Any(value => value.Style.HasFlag(FontStyle.Underline)), "Markdown formatting parses");
             using (var editor = new NoteEditorDialog(note))
@@ -1341,6 +1344,7 @@ internal static class SmokeTests
                 Assert(note.Items.Count == 2 && !note.Items[0].Completed && note.Items[1].Completed, "completed checklist moves to bottom");
                 if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("DESKTOP_LIST_QA_NOTE_PATH")))
                 {
+                    noteForm.SetResizeCornerForTest(OverlayResizeCorner.BottomRight);
                     noteForm.StartPosition = FormStartPosition.Manual; noteForm.Location = new Point(-10000, -10000); noteForm.Show(); Application.DoEvents();
                     Assert(noteForm.HasScrollableContent, "small note retains overflow content"); noteForm.ScrollForTest(120); Assert(noteForm.ScrollOffset > 0, "small note scrolls vertically"); noteForm.Hide();
                 }
