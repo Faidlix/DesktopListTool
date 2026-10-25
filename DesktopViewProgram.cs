@@ -1159,6 +1159,9 @@ internal static class SmokeTests
             Assert(DesktopLayeredOverlayForm.ConstrainRectangle(new Rectangle(1530, 200, 400, 500), workArea).Right == 1920, "right overflow constrained");
             Assert(DesktopLayeredOverlayForm.ConstrainRectangle(new Rectangle(400, 560, 400, 500), workArea).Bottom == 1040, "bottom overflow constrained");
             Assert(OverlayStyleRendering.GetResizeCorner(new Point(2, 2), new Size(400, 300)) == OverlayResizeCorner.TopLeft && OverlayStyleRendering.GetResizeCorner(new Point(398, 298), new Size(400, 300)) == OverlayResizeCorner.BottomRight, "resize hover corners are detected around the frame");
+            Assert(OverlayStyleRendering.ResizeIndicatorThickness >= 10F, "rounded resize indicator is approximately scrollbar-thumb thickness");
+            using (var inputHitBrush = OverlayStyleRendering.CreateInputHitBrush(Color.DarkOrange))
+                Assert(inputHitBrush.Color.A == 1, "detached list transparent surface remains mouse-interactive without becoming visible");
             Assert(OverlayAppearanceSettings.DecodeExplorerAccentColor(0xFF2A4C91).ToArgb() == Color.FromArgb(145, 76, 42).ToArgb(), "Explorer start menu ABGR color is decoded correctly");
             Assert(OverlaySettings.GetSettingsKey("custom:smoke").Contains(DisplayLayoutIdentity.CurrentId, StringComparison.Ordinal), "list settings are isolated by display layout");
             var currentScreen = Screen.PrimaryScreen ?? Screen.AllScreens[0];
@@ -1204,6 +1207,19 @@ internal static class SmokeTests
             var referenced = DesktopOverlayEntry.LoadPaths([referenceFile]);
             Assert(referenced.Count == 1 && File.Exists(referenceFile), "custom list references without moving source");
             Assert(NativeShellContextMenu.TryShow(IntPtr.Zero, referenceFile, Point.Empty, display: false), "native shell context menu marshaling");
+            var previousFloatingQa = Environment.GetEnvironmentVariable("DESKTOP_LIST_QA_FLOATING");
+            Environment.SetEnvironmentVariable("DESKTOP_LIST_QA_FLOATING", "1");
+            try
+            {
+                using var detachedOverlay = new DesktopLayeredOverlayForm(ListItemSize.Standard,
+                    defaultBounds: new Rectangle(currentScreen.WorkingArea.Left + 120, currentScreen.WorkingArea.Top + 120, 360, 180),
+                    customList: new CustomListData { Paths = [referenceFile] });
+                detachedOverlay.Show(); Application.DoEvents();
+                var blankPoint = detachedOverlay.PointToScreen(new Point(detachedOverlay.ClientSize.Width / 2, detachedOverlay.ClientSize.Height - 24));
+                Assert(detachedOverlay.OwnsScreenPointForTest(blankPoint), "detached list transparent blank area receives right-click and move input");
+                detachedOverlay.Hide();
+            }
+            finally { Environment.SetEnvironmentVariable("DESKTOP_LIST_QA_FLOATING", previousFloatingQa); }
             Directory.Delete(referenceRoot, recursive: true);
 
             using (var appearance = new OverlayStyleDialog(new OverlayStyleOptions

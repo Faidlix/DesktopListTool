@@ -340,6 +340,8 @@ internal sealed class OverlayStyleDialog : Form
 
 internal static class OverlayStyleRendering
 {
+    internal static float ResizeIndicatorThickness => Math.Clamp(SystemInformation.VerticalScrollBarWidth * .65F, 10F, 14F);
+
     public static OverlayResizeCorner GetResizeCorner(Point point, Size size, int range = 24)
     {
         var left = point.X >= -range && point.X <= range;
@@ -369,20 +371,25 @@ internal static class OverlayStyleRendering
             };
             graphics.FillPolygon(brush, points); return;
         }
-        var radius = Math.Min(cornerRadius, Math.Min(frame.Width, frame.Height) / 2); var diameter = radius * 2; var tail = Math.Min(34, Math.Max(14, radius));
-        using var pen = new Pen(color, 6F) { StartCap = LineCap.Round, EndCap = LineCap.Round };
+        var thickness = ResizeIndicatorThickness;
+        var inset = (int)Math.Ceiling(thickness / 2F);
+        var resizeFrame = Rectangle.Inflate(frame, -inset, -inset);
+        var radius = Math.Min(cornerRadius, Math.Min(resizeFrame.Width, resizeFrame.Height) / 2); var diameter = radius * 2; var tail = Math.Min(34, Math.Max(14, radius));
+        using var pen = new Pen(color, thickness) { StartCap = LineCap.Round, EndCap = LineCap.Round };
         switch (corner)
         {
             case OverlayResizeCorner.TopLeft:
-                graphics.DrawArc(pen, frame.Left, frame.Top, diameter, diameter, 180, 90); graphics.DrawLine(pen, frame.Left, frame.Top + radius, frame.Left, frame.Top + radius + tail); graphics.DrawLine(pen, frame.Left + radius, frame.Top, frame.Left + radius + tail, frame.Top); break;
+                graphics.DrawArc(pen, resizeFrame.Left, resizeFrame.Top, diameter, diameter, 180, 90); graphics.DrawLine(pen, resizeFrame.Left, resizeFrame.Top + radius, resizeFrame.Left, resizeFrame.Top + radius + tail); graphics.DrawLine(pen, resizeFrame.Left + radius, resizeFrame.Top, resizeFrame.Left + radius + tail, resizeFrame.Top); break;
             case OverlayResizeCorner.TopRight:
-                graphics.DrawArc(pen, frame.Right - diameter, frame.Top, diameter, diameter, 270, 90); graphics.DrawLine(pen, frame.Right, frame.Top + radius, frame.Right, frame.Top + radius + tail); graphics.DrawLine(pen, frame.Right - radius, frame.Top, frame.Right - radius - tail, frame.Top); break;
+                graphics.DrawArc(pen, resizeFrame.Right - diameter, resizeFrame.Top, diameter, diameter, 270, 90); graphics.DrawLine(pen, resizeFrame.Right, resizeFrame.Top + radius, resizeFrame.Right, resizeFrame.Top + radius + tail); graphics.DrawLine(pen, resizeFrame.Right - radius, resizeFrame.Top, resizeFrame.Right - radius - tail, resizeFrame.Top); break;
             case OverlayResizeCorner.BottomLeft:
-                graphics.DrawArc(pen, frame.Left, frame.Bottom - diameter, diameter, diameter, 90, 90); graphics.DrawLine(pen, frame.Left, frame.Bottom - radius, frame.Left, frame.Bottom - radius - tail); graphics.DrawLine(pen, frame.Left + radius, frame.Bottom, frame.Left + radius + tail, frame.Bottom); break;
+                graphics.DrawArc(pen, resizeFrame.Left, resizeFrame.Bottom - diameter, diameter, diameter, 90, 90); graphics.DrawLine(pen, resizeFrame.Left, resizeFrame.Bottom - radius, resizeFrame.Left, resizeFrame.Bottom - radius - tail); graphics.DrawLine(pen, resizeFrame.Left + radius, resizeFrame.Bottom, resizeFrame.Left + radius + tail, resizeFrame.Bottom); break;
             case OverlayResizeCorner.BottomRight:
-                graphics.DrawArc(pen, frame.Right - diameter, frame.Bottom - diameter, diameter, diameter, 0, 90); graphics.DrawLine(pen, frame.Right, frame.Bottom - radius, frame.Right, frame.Bottom - radius - tail); graphics.DrawLine(pen, frame.Right - radius, frame.Bottom, frame.Right - radius - tail, frame.Bottom); break;
+                graphics.DrawArc(pen, resizeFrame.Right - diameter, resizeFrame.Bottom - diameter, diameter, diameter, 0, 90); graphics.DrawLine(pen, resizeFrame.Right, resizeFrame.Bottom - radius, resizeFrame.Right, resizeFrame.Bottom - radius - tail); graphics.DrawLine(pen, resizeFrame.Right - radius, resizeFrame.Bottom, resizeFrame.Right - radius - tail, resizeFrame.Bottom); break;
         }
     }
+
+    public static SolidBrush CreateInputHitBrush(Color color) => new(Color.FromArgb(1, color.R, color.G, color.B));
 
     public static Brush CreateBackgroundBrush(Rectangle bounds, OverlayStyleOptions style, Color primary)
     {

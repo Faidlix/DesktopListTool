@@ -65,6 +65,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
     public bool IsFloating => _isFloating;
     internal IReadOnlyList<string> ContextMenuLabels => _menu?.Items.Cast<ToolStripItem>().Select(value => value.Text ?? "").ToArray() ?? [];
     internal IReadOnlyList<string> EntryPaths => _entries.Select(value => value.Path).ToArray();
+    internal bool OwnsScreenPointForTest(Point screenPoint) => WindowFromPoint(screenPoint) == Handle;
     internal void SetResizeCornerForTest(OverlayResizeCorner corner) { _resizeHoverCorner = corner; _frameVisible = true; RenderLayer(); }
     internal Func<DesktopLayeredOverlayForm, Rectangle, Rectangle>? ResolvePlacement;
     private string? SettingsIdentity => _customList is null ? _folderPath : $"custom:{_customList.Id:N}";
@@ -441,6 +442,14 @@ internal sealed class DesktopLayeredOverlayForm : Form
             graphics.Clear(Color.Transparent);
             graphics.SmoothingMode = SmoothingMode.AntiAlias;
             graphics.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+            using var inputHitBrush = _customList is null ? null : OverlayStyleRendering.CreateInputHitBrush(_backgroundColor);
+            if (inputHitBrush is not null)
+            {
+                if (_style.CornerRadius > 0)
+                    graphics.FillRoundedRectangle(inputHitBrush, ClientRectangle, Math.Min(_style.CornerRadius, Math.Min(ClientSize.Width, ClientSize.Height) / 2));
+                else
+                    graphics.FillRectangle(inputHitBrush, ClientRectangle);
+            }
             using var hitTargetBrush = OverlayStyleRendering.CreateBackgroundBrush(ClientRectangle, _style, _backgroundColor);
             if (_style.CornerRadius > 0)
                 graphics.FillRoundedRectangle(hitTargetBrush, ClientRectangle, Math.Min(_style.CornerRadius, Math.Min(ClientSize.Width, ClientSize.Height) / 2));
