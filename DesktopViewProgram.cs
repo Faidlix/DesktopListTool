@@ -1332,8 +1332,19 @@ internal static class SmokeTests
                 using var detachedOverlay = new DesktopLayeredOverlayForm(ListItemSize.Standard,
                     defaultBounds: new Rectangle(currentScreen.WorkingArea.Left + 120, currentScreen.WorkingArea.Top + 120, 360, 180),
                     customList: new CustomListData { Paths = [referenceFile, secondReference, thirdReference] });
+                var narrowWidth = detachedOverlay.MinimumSize.Width;
+                var narrowHeight = detachedOverlay.RequiredContentHeightForTest(narrowWidth);
+                var wideWidth = Math.Min(currentScreen.WorkingArea.Width - 80, narrowWidth * 3);
+                var wideHeight = detachedOverlay.RequiredContentHeightForTest(wideWidth);
+                Assert(detachedOverlay.AdaptiveColumnCountForTest(wideWidth) > detachedOverlay.AdaptiveColumnCountForTest(narrowWidth) && wideHeight < narrowHeight, "detached list adds horizontal columns and lowers its required height when widened");
+                var normalMetrics = detachedOverlay.LayoutMetricsForTest;
+                detachedOverlay.SetTextMetricsForTest(36F, 84, 12);
+                var largeMetrics = detachedOverlay.LayoutMetricsForTest;
+                Assert(largeMetrics.Width > normalMetrics.Width && largeMetrics.Height > normalMetrics.Height && detachedOverlay.RequiredContentHeightForTest(narrowWidth) > narrowHeight, "font and line scaling immediately update list cell metrics and minimum range");
+                detachedOverlay.SetTextMetricsForTest(10F, 36, 0);
                 detachedOverlay.FitToContentMinimum();
-                Assert(detachedOverlay.Size == detachedOverlay.MinimumSize && detachedOverlay.MinimumSize.Height > 100, "detached list minimum size displays all current items");
+                Assert(detachedOverlay.Width == narrowWidth && detachedOverlay.Height == narrowHeight && narrowHeight > detachedOverlay.MinimumSize.Height, "detached list initial minimum range displays all current items");
+                detachedOverlay.Size = new Size(wideWidth, wideHeight);
                 detachedOverlay.Show(); Application.DoEvents();
                 var blankPoint = detachedOverlay.PointToScreen(new Point(detachedOverlay.ClientSize.Width - 24, detachedOverlay.ClientSize.Height / 2));
                 Assert(detachedOverlay.OwnsScreenPointForTest(blankPoint), "detached list transparent blank area receives right-click and move input");

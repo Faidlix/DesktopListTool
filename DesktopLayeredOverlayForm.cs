@@ -260,20 +260,18 @@ internal sealed class DesktopLayeredOverlayForm : Form
         var screenWidth = Screen.FromRectangle(Bounds).WorkingArea.Width;
         var minimumWidth = Math.Clamp(widestText + _iconSize + 42, 220, Math.Max(220, screenWidth - 80));
         var minimumHeight = _rowHeight + ContentPadding * 2;
-        if (_customList is not null && _entries.Count > 0)
-            minimumHeight = Math.Clamp(_entries.Count * _rowHeight + ContentPadding * 2, minimumHeight,
-                Math.Max(minimumHeight, Screen.FromRectangle(Bounds).WorkingArea.Height - 80));
         MinimumSize = new Size(minimumWidth, minimumHeight);
         if (Width < minimumWidth)
             Width = minimumWidth;
-        if (Height < MinimumSize.Height)
-            Height = MinimumSize.Height;
+        var requiredHeight = _customList is null ? minimumHeight : GetRequiredCustomHeight(Width);
+        if (Height < requiredHeight)
+            Height = requiredHeight;
     }
 
     internal void FitToContentMinimum()
     {
         if (_customList is null) return;
-        Size = MinimumSize;
+        Size = new Size(MinimumSize.Width, GetRequiredCustomHeight(MinimumSize.Width));
         RenderLayer();
     }
 
@@ -285,7 +283,27 @@ internal sealed class DesktopLayeredOverlayForm : Form
         return Math.Clamp(widestText + _iconSize + 42, 180, 520);
     }
 
-    private bool UseHorizontalLayout => ClientSize.Width >= ClientSize.Height * 1.35;
+    private bool UseAdaptiveCustomLayout => _customList is not null;
+    private bool UseHorizontalLayout => !UseAdaptiveCustomLayout && ClientSize.Width >= ClientSize.Height * 1.35;
+
+    private int GetCustomColumnCount(int width) => Math.Max(1, Math.Max(1, width - ContentPadding * 2) / Math.Max(1, _columnWidth));
+    private int GetCustomRowCount(int width) => Math.Max(1, (int)Math.Ceiling(_entries.Count / (double)GetCustomColumnCount(width)));
+    private int GetRequiredCustomHeight(int width)
+    {
+        var minimum = _rowHeight + ContentPadding * 2;
+        var desired = GetCustomRowCount(width) * LayoutRowHeight + ContentPadding * 2;
+        return Math.Clamp(desired, minimum, Math.Max(minimum, Screen.FromRectangle(Bounds).WorkingArea.Height - 80));
+    }
+
+    internal int AdaptiveColumnCountForTest(int width) => GetCustomColumnCount(width);
+    internal int RequiredContentHeightForTest(int width) => GetRequiredCustomHeight(width);
+    internal Size LayoutMetricsForTest => new(_columnWidth, _rowHeight);
+    internal void SetTextMetricsForTest(float fontSize, int lineHeight, int lineSpacing)
+    {
+        var style = _style.Clone();
+        style.FontSize = fontSize; style.LineHeight = lineHeight; style.LineSpacing = lineSpacing;
+        ApplyStyle(style, save: false);
+    }
 
     private int RowsPerColumn => Math.Max(1, (ClientSize.Height - ContentPadding * 2) / Math.Max(1, _rowHeight));
     private int LayoutRowHeight => _rowHeight;
@@ -400,7 +418,16 @@ internal sealed class DesktopLayeredOverlayForm : Form
             point.Y < ContentPadding || point.Y >= ClientSize.Height - ContentPadding)
             return -1;
         int index;
-        if (UseHorizontalLayout)
+        if (UseAdaptiveCustomLayout)
+        {
+            var contentX = point.X - ContentPadding;
+            var contentY = point.Y - ContentPadding + _scrollOffset;
+            var column = contentX / Math.Max(1, _columnWidth);
+            if (column >= GetCustomColumnCount(ClientSize.Width)) return -1;
+            var row = contentY / Math.Max(1, LayoutRowHeight);
+            index = row * GetCustomColumnCount(ClientSize.Width) + column;
+        }
+        else if (UseHorizontalLayout)
         {
             var contentX = point.X - ContentPadding + _scrollOffset;
             var column = contentX / Math.Max(1, _columnWidth);
@@ -418,7 +445,12 @@ internal sealed class DesktopLayeredOverlayForm : Form
     private void ClampScroll()
     {
         int maximum;
-        if (UseHorizontalLayout)
+        if (UseAdaptiveCustomLayout)
+        {
+            var viewportHeight = Math.Max(0, ClientSize.Height - ContentPadding * 2);
+            maximum = Math.Max(0, GetCustomRowCount(ClientSize.Width) * LayoutRowHeight - viewportHeight);
+        }
+        else if (UseHorizontalLayout)
         {
             var columns = (int)Math.Ceiling(_entries.Count / (double)RowsPerColumn);
             var viewportWidth = Math.Max(0, ClientSize.Width - ContentPadding * 2);
@@ -470,7 +502,9 @@ internal sealed class DesktopLayeredOverlayForm : Form
             else
                 graphics.FillRectangle(hitTargetBrush, ClientRectangle);
 
-            if (UseHorizontalLayout)
+            if (UseAdaptiveCustomLayout)
+                DrawAdaptiveCustomEntries(graphics);
+            else if (UseHorizontalLayout)
                 DrawHorizontalEntries(graphics);
             else
                 DrawVerticalEntries(graphics);
@@ -530,6 +564,20 @@ internal sealed class DesktopLayeredOverlayForm : Form
             if (x + _columnWidth < ContentPadding || x >= ClientSize.Width - ContentPadding)
                 continue;
             var y = ContentPadding + row * LayoutRowHeight;
+            DrawEntry(graphics, _entries[index], index, new Rectangle(x, y, _columnWidth, LayoutRowHeight));
+        }
+    }
+
+    private void DrawAdaptiveCustomEntries(Graphics graphics)
+    {
+        var columns = GetCustomColumnCount(ClientSize.Width);
+        for (var index = 0; index < _entries.Count; index++)
+        {
+            var row = index / columns;
+            var column = index % columns;
+            var y = ContentPadding + row * LayoutRowHeight - _scrollOffset;
+            if (y + LayoutRowHeight < ContentPadding || y >= ClientSize.Height - ContentPadding) continue;
+            var x = ContentPadding + column * _columnWidth;
             DrawEntry(graphics, _entries[index], index, new Rectangle(x, y, _columnWidth, LayoutRowHeight));
         }
     }
@@ -905,13 +953,23 @@ internal sealed class DesktopLayeredOverlayForm : Form
         if (index < 0)
             return _entries.Count;
         var bounds = GetEntryBounds(index);
-        return UseHorizontalLayout
+        return UseAdaptiveCustomLayout
+            ? (point.X < bounds.Left + bounds.Width / 2 ? index : index + 1)
+            : UseHorizontalLayout
             ? (point.Y < bounds.Top + bounds.Height / 2 ? index : index + 1)
             : (point.Y < bounds.Top + bounds.Height / 2 ? index : index + 1);
     }
 
     private Rectangle GetEntryBounds(int index)
     {
+        if (UseAdaptiveCustomLayout)
+        {
+            var columns = GetCustomColumnCount(ClientSize.Width);
+            var row = index / columns;
+            var column = index % columns;
+            return new Rectangle(ContentPadding + column * _columnWidth,
+                ContentPadding + row * LayoutRowHeight - _scrollOffset, _columnWidth, LayoutRowHeight);
+        }
         if (UseHorizontalLayout)
         {
             var column = index / RowsPerColumn;
@@ -1126,6 +1184,8 @@ internal sealed class DesktopLayeredOverlayForm : Form
         {
             var sizingBounds = Marshal.PtrToStructure<NativeRect>(message.LParam).ToRectangle();
             sizingBounds = ConstrainSizingRectangle(sizingBounds, Screen.FromRectangle(sizingBounds).WorkingArea, message.WParam.ToInt32(), MinimumSize);
+            if (_customList is not null)
+                sizingBounds = ConstrainCustomContentSizing(sizingBounds, Screen.FromRectangle(sizingBounds).WorkingArea, message.WParam.ToInt32());
             Marshal.StructureToPtr(NativeRect.FromRectangle(sizingBounds), message.LParam, false);
         }
 
@@ -1188,6 +1248,16 @@ internal sealed class DesktopLayeredOverlayForm : Form
         if (sizesLeft) left = Math.Max(workArea.Left, Math.Min(left, right - minimum.Width)); else right = Math.Min(workArea.Right, Math.Max(right, left + minimum.Width));
         if (sizesTop) top = Math.Max(workArea.Top, Math.Min(top, bottom - minimum.Height)); else bottom = Math.Min(workArea.Bottom, Math.Max(bottom, top + minimum.Height));
         return Rectangle.FromLTRB(left, top, right, bottom);
+    }
+
+    private Rectangle ConstrainCustomContentSizing(Rectangle bounds, Rectangle workArea, int edge)
+    {
+        var requiredHeight = GetRequiredCustomHeight(bounds.Width);
+        if (bounds.Height >= requiredHeight) return bounds;
+        var sizesTop = edge is 3 or 4 or 5;
+        if (sizesTop) bounds.Y = bounds.Bottom - requiredHeight;
+        bounds.Height = requiredHeight;
+        return ConstrainRectangle(bounds, workArea);
     }
 
     private void ApplyLayeredBitmap(Bitmap bitmap)
