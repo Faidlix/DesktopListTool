@@ -217,7 +217,7 @@ internal sealed class OverlayStyleDialog : Form
         _weight.Value = style.Bold ? FontStyle.Bold : FontStyle.Regular; _alignment.Value = style.TextAlignment; _distribution.Value = style.Distribution; _gradientDirection.Value = style.GradientDirection; _gradientMode.Value = style.GradientMode;
         UpdateWeightButtons();
 
-        var isListStyle = targetName.Contains("清單", StringComparison.Ordinal);
+        var isListStyle = string.Equals(targetName, "清單", StringComparison.Ordinal);
         var table = new TableLayoutPanel { Dock = DockStyle.Fill, AutoScroll = true, Padding = new Padding(22), ColumnCount = 2, RowCount = isListStyle ? 19 : 18 };
         table.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 210)); table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
         for (var i = 0; i < table.RowCount; i++) table.RowStyles.Add(new RowStyle(SizeType.AutoSize));

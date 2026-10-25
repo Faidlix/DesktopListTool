@@ -1,6 +1,6 @@
-// 功能：建立、顯示、編輯與保存桌面便籤，支援 Markdown、多段文字及會自動移到底部的勾選事項。
-// 使用：在清單空白處右鍵選「新增便籤」；Enter 換行，只有點「確定」才保存，Esc 取消。
-// 設定：便籤右鍵可編輯或刪除；位置、大小、內容與勾選狀態依單／多螢幕配置保存於目前使用者登錄設定。
+// 功能：建立、顯示、編輯與保存分離的桌面便籤與代辦清單，並遷移舊版混合內容。
+// 使用：在清單或便籤空白處右鍵選「新增便籤」或「新增代辦清單」；只有按「確定」才保存。
+// 設定：兩種物件的種類、位置、大小、內容、勾選狀態與樣式依單／多螢幕配置保存於目前使用者登錄設定。
 
 using System.Runtime.InteropServices;
 using System.Text.Json;
@@ -8,9 +8,12 @@ using Microsoft.Win32;
 
 namespace DesktopListTool;
 
+internal enum DesktopNoteKind { Note, Todo }
+
 internal sealed class DesktopNoteData
 {
     public Guid Id { get; set; } = Guid.NewGuid();
+    public DesktopNoteKind? Kind { get; set; }
     public string Text { get; set; } = "";
     public List<DesktopChecklistItem> Items { get; set; } = [];
     public int X { get; set; }
@@ -45,20 +48,14 @@ internal sealed class DesktopNoteData
         get => new(X, Y, Math.Max(240, Width), Math.Max(140, Height));
         set { X = value.X; Y = value.Y; Width = value.Width; Height = value.Height; }
     }
-}
 
-internal static class NoteEditorSettings
-{
-    private const string KeyPath = @"Software\DesktopListTool";
-    public static int LoadSplitter()
+    public DesktopNoteData CreateCompanion(DesktopNoteKind kind, Point offset)
     {
-        try { using var key = Registry.CurrentUser.OpenSubKey(KeyPath); return Math.Clamp(Convert.ToInt32(key?.GetValue("NoteEditorSplitter", 220) ?? 220), 120, 520); }
-        catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException or FormatException) { return 220; }
-    }
-    public static void SaveSplitter(int value)
-    {
-        try { using var key = Registry.CurrentUser.CreateSubKey(KeyPath); key.SetValue("NoteEditorSplitter", value, RegistryValueKind.DWord); }
-        catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException) { }
+        var clone = (DesktopNoteData)MemberwiseClone();
+        clone.Id = Guid.NewGuid(); clone.Kind = kind;
+        clone.Items = Items.Select(value => new DesktopChecklistItem { Id = value.Id, Text = value.Text, Completed = value.Completed }).ToList();
+        clone.Bounds = new Rectangle(Bounds.X + offset.X, Bounds.Y + offset.Y, Bounds.Width, Bounds.Height);
+        return clone;
     }
 }
 
@@ -302,13 +299,16 @@ internal sealed class DesktopNoteForm : Form
 
 internal sealed class NoteEditorDialog : Form
 {
+    private readonly DesktopNoteKind _kind;
     private readonly TextBox _body = new();
     private readonly FlowLayoutPanel _taskRows = new();
     private readonly SplitContainer _split = new() { Dock = DockStyle.Fill, Orientation = Orientation.Horizontal, FixedPanel = FixedPanel.None, Panel1MinSize = 100, Panel2MinSize = 120, SplitterWidth = 7 };
 
-    public NoteEditorDialog(DesktopNoteData? existing = null)
+    public NoteEditorDialog(DesktopNoteKind kind, DesktopNoteData? existing = null)
     {
-        Text = existing is null ? "新增便籤" : "編輯便籤";
+        _kind = kind;
+        var typeName = kind == DesktopNoteKind.Note ? "便籤" : "代辦清單";
+        Text = existing is null ? $"新增{typeName}" : $"編輯{typeName}";
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.Sizable;
         MinimumSize = new Size(560, 480);
@@ -344,7 +344,11 @@ internal sealed class NoteEditorDialog : Form
         _taskRows.WrapContents = false;
         _taskRows.AutoScroll = true;
         tasksPanel.Controls.Add(_taskRows); tasksPanel.Controls.Add(tasksHeader);
-        _split.Panel1.Controls.Add(bodyPanel); _split.Panel2.Controls.Add(tasksPanel);
+        if (kind == DesktopNoteKind.Note)
+            _split.Panel1.Controls.Add(bodyPanel);
+        else
+            _split.Panel1.Controls.Add(tasksPanel);
+        _split.Panel2Collapsed = true;
 
         var buttons = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 58, FlowDirection = FlowDirection.RightToLeft, Padding = new Padding(10) };
         var cancel = new Button { Text = "取消", DialogResult = DialogResult.Cancel, Size = new Size(90, 34) };
@@ -353,19 +357,21 @@ internal sealed class NoteEditorDialog : Form
         CancelButton = cancel;
         Controls.Add(_split); Controls.Add(buttons);
 
-        foreach (var item in existing?.Items ?? [])
-            AddTaskRow(item);
+        if (kind == DesktopNoteKind.Todo)
+        {
+            foreach (var item in existing?.Items ?? []) AddTaskRow(item);
+            if (_taskRows.Controls.Count == 0) AddTaskRow(null);
+        }
         Shown += (_, _) =>
         {
-            _split.SplitterDistance = Math.Clamp(NoteEditorSettings.LoadSplitter(), _split.Panel1MinSize, Math.Max(_split.Panel1MinSize, _split.Height - _split.Panel2MinSize));
-            _body.Focus();
+            if (_kind == DesktopNoteKind.Note) _body.Focus();
+            else _taskRows.Controls.OfType<Panel>().FirstOrDefault()?.Controls.OfType<TextBox>().FirstOrDefault()?.Focus();
         };
-        FormClosed += (_, _) => NoteEditorSettings.SaveSplitter(_split.SplitterDistance);
     }
 
-    public string NoteText => _body.Text;
+    public string NoteText => _kind == DesktopNoteKind.Note ? _body.Text : "";
 
-    public IReadOnlyList<DesktopChecklistItem> ChecklistItems => _taskRows.Controls
+    public IReadOnlyList<DesktopChecklistItem> ChecklistItems => _kind == DesktopNoteKind.Note ? [] : _taskRows.Controls
         .OfType<Panel>()
         .Select(panel => new DesktopChecklistItem
         {

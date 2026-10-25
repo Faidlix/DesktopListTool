@@ -1,6 +1,6 @@
-// 功能：以可自訂透明樣式顯示可捲動 Markdown 與勾選事項，支援懸浮圖釘且不遮住內容。
-// 使用：空白處拖曳、本文或事項連點兩下原地編輯、滑鼠滾輪捲動；角落以加粗圓弧或三角提示縮放。
-// 設定：位置、內容與樣式逐張保存；非懸浮便籤參與桌面清單的拖曳避讓，懸浮便籤允許重疊。
+// 功能：以可自訂透明樣式分別顯示可捲動 Markdown 便籤或代辦清單，支援懸浮圖釘且不遮住內容。
+// 使用：空白處拖曳、本文或代辦事項連點兩下原地編輯、滑鼠滾輪捲動；便籤不顯示代辦新增按鈕。
+// 設定：位置、種類、內容與樣式逐張保存；固定物件不啟用也不浮到一般視窗前，懸浮物件才允許置頂。
 
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
@@ -26,6 +26,8 @@ internal sealed class DesktopLayeredNoteForm : Form
     private InlineTextEditor? _inlineEditor;
     private bool _editingBody;
     private Guid? _editingChecklistItemId;
+    private string? _editingText;
+    private int _editingCaretIndex;
     private Rectangle _bodyTextBounds;
     private bool _frameVisible;
     private OverlayResizeCorner _resizeHoverCorner;
@@ -75,8 +77,9 @@ internal sealed class DesktopLayeredNoteForm : Form
         _frameVisible = Environment.GetEnvironmentVariable("DESKTOP_LIST_QA_SHOW_FRAME") == "1";
 
         _menu = new ContextMenuStrip();
-        _menu.Items.Add("新增便籤…", null, (_, _) => AddNoteRequested?.Invoke(this, new NoteRequestedEventArgs(_lastContextScreenPoint)));
-        _menu.Items.Add("編輯便籤內容", null, (_, _) => EditRequested?.Invoke(this, EventArgs.Empty));
+        _menu.Items.Add("新增便籤…", null, (_, _) => AddNoteRequested?.Invoke(this, new NoteRequestedEventArgs(_lastContextScreenPoint, DesktopNoteKind.Note)));
+        _menu.Items.Add("新增代辦清單…", null, (_, _) => AddNoteRequested?.Invoke(this, new NoteRequestedEventArgs(_lastContextScreenPoint, DesktopNoteKind.Todo)));
+        _menu.Items.Add(_data.Kind == DesktopNoteKind.Todo ? "編輯代辦清單" : "編輯便籤內容", null, (_, _) => EditRequested?.Invoke(this, EventArgs.Empty));
         _menu.Items.Add("樣式…", null, (_, _) => EditStyle());
         _menu.Items.Add("複製樣式", null, (_, _) => OverlayStyleClipboard.Copy(_style));
         var pasteStyle = new ToolStripMenuItem("貼上樣式");
@@ -86,7 +89,7 @@ internal sealed class DesktopLayeredNoteForm : Form
         _floatingItem.Click += (_, _) => { if (_isFloating) ReturnToDesktop(); else MakeFloating(); };
         _menu.Items.Add(_floatingItem);
         _menu.Items.Add(new ToolStripSeparator());
-        _menu.Items.Add("刪除便籤", null, (_, _) => DeleteRequested?.Invoke(this, EventArgs.Empty));
+        _menu.Items.Add(_data.Kind == DesktopNoteKind.Todo ? "刪除代辦清單" : "刪除便籤", null, (_, _) => DeleteRequested?.Invoke(this, EventArgs.Empty));
         _menu.Opening += (_, _) => pasteStyle.Enabled = OverlayStyleClipboard.HasStyle;
 
         MouseMove += HandleMouseMove;
@@ -101,16 +104,29 @@ internal sealed class DesktopLayeredNoteForm : Form
     }
 
     public DesktopNoteData Data => _data;
+    private bool IsTodo => _data.Kind == DesktopNoteKind.Todo;
     public bool IsFloating => _isFloating;
     internal IReadOnlyList<string> ContextMenuLabels => _menu.Items.Cast<ToolStripItem>().Select(value => value.Text ?? "").ToArray();
     internal bool HasScrollableContent => _contentHeight > SafeContentBounds.Height;
     internal int ScrollOffset => _scrollOffset;
     internal int LastDistributionExtra => _lastDistributionExtra;
+    internal bool UsesNoActivateForTest => (CreateParams.ExStyle & 0x08000000) != 0;
+    internal IntPtr MouseActivateResultForTest() { var message = Message.Create(Handle, 0x0021, IntPtr.Zero, IntPtr.Zero); WndProc(ref message); return message.Result; }
+    internal bool HasAddChecklistButtonForTest => !_addChecklistBounds.IsEmpty;
     internal void SetResizeCornerForTest(OverlayResizeCorner corner) { _resizeHoverCorner = corner; _frameVisible = true; RenderLayer(); }
     internal void RenderForTest() { _ = Handle; RenderLayer(); }
     internal void ScrollForTest(int delta)
     {
         _scrollOffset += delta; ClampScroll(); RenderLayer();
+    }
+    internal void SetInlineDraftForTest(string text)
+    {
+        _editingBody = true; _editingChecklistItemId = null; _editingText = text; _editingCaretIndex = text.Length; _frameVisible = true;
+        var qaPath = Environment.GetEnvironmentVariable("DESKTOP_LIST_QA_NOTE_PATH");
+        Environment.SetEnvironmentVariable("DESKTOP_LIST_QA_NOTE_PATH", null);
+        _scrollOffset = 0; RenderLayer();
+        if (!string.IsNullOrWhiteSpace(qaPath)) Environment.SetEnvironmentVariable("DESKTOP_LIST_QA_NOTE_PATH", qaPath);
+        _scrollOffset = Math.Max(0, _contentHeight - SafeContentBounds.Height); RenderLayer();
     }
     public void PersistState() => CapturePlacement();
     protected override bool ShowWithoutActivation => true;
@@ -121,13 +137,14 @@ internal sealed class DesktopLayeredNoteForm : Form
         {
             const int WsExLayered = 0x00080000;
             const int WsExToolWindow = 0x00000080;
+            const int WsExNoActivate = 0x08000000;
             const int WsOverlappedWindow = 0x00CF0000;
             const int WsPopup = unchecked((int)0x80000000);
             const int WsExWindowEdge = 0x00000100;
             var value = base.CreateParams;
             value.Style = (value.Style & ~WsOverlappedWindow) | WsPopup;
             value.ExStyle &= ~WsExWindowEdge;
-            value.ExStyle |= WsExLayered | WsExToolWindow;
+            value.ExStyle |= WsExLayered | WsExToolWindow | WsExNoActivate;
             return value;
         }
     }
@@ -159,6 +176,7 @@ internal sealed class DesktopLayeredNoteForm : Form
 
     private void HandleMouseDown(object? sender, MouseEventArgs e)
     {
+        if (!_isFloating) EnsureDesktopZOrder();
         RevealFrame();
         if (e.Button == MouseButtons.Left && _isFloating && FloatingReturnButtonBounds.Contains(e.Location))
         {
@@ -180,12 +198,12 @@ internal sealed class DesktopLayeredNoteForm : Form
             _scrollDragStartOffset = _scrollOffset;
             return;
         }
-        if (_addChecklistBounds.Contains(e.Location))
+        if (IsTodo && _addChecklistBounds.Contains(e.Location))
         {
             var item = new DesktopChecklistItem(); _data.Items.Insert(0, item); RenderLayer(); BeginInlineChecklistEdit(item, true);
             return;
         }
-        var hit = _checkBounds.FirstOrDefault(value => value.Bounds.Contains(e.Location));
+        var hit = IsTodo ? _checkBounds.FirstOrDefault(value => value.Bounds.Contains(e.Location)) : default;
         if (hit.Item is not null)
         {
             _pendingCheckItem = hit.Item;
@@ -224,12 +242,12 @@ internal sealed class DesktopLayeredNoteForm : Form
     {
         if (e.Button != MouseButtons.Left || FloatingReturnButtonBounds.Contains(e.Location) || ScrollbarThumbBounds.Contains(e.Location) || IsResizeCorner(e.Location)) return;
         _movePending = false;
-        var hit = _checkBounds.FirstOrDefault(value => value.Bounds.Contains(e.Location));
+        var hit = IsTodo ? _checkBounds.FirstOrDefault(value => value.Bounds.Contains(e.Location)) : default;
         if (hit.Item is not null)
         {
             _checkClickTimer.Stop(); _pendingCheckItem = null; BeginInlineChecklistEdit(hit.Item, false); return;
         }
-        if (!_addChecklistBounds.Contains(e.Location)) BeginInlineBodyEdit();
+        if (!IsTodo && !_addChecklistBounds.Contains(e.Location)) BeginInlineBodyEdit();
     }
 
     private void RenderLayer()
@@ -290,20 +308,22 @@ internal sealed class DesktopLayeredNoteForm : Form
         var itemStep = Math.Max(_style.LineHeight, (int)Math.Ceiling(_font.GetHeight(graphics)) + 6) + _style.LineSpacing;
         _lastDistributionExtra = 0;
         var bodyTop = y;
-        if (!string.IsNullOrWhiteSpace(_data.Text) && !_editingBody)
+        var bodyText = _editingBody ? _editingText ?? "" : _data.Text;
+        if (!IsTodo && !string.IsNullOrWhiteSpace(bodyText))
         {
             using var textBrush = new SolidBrush(_style.TextColor);
             using var shadowBrush = new SolidBrush(Color.FromArgb(210, 0, 0, 0));
-            y = DrawMarkdownText(graphics, _data.Text, safe.Left, y, width, shadowBrush, textBrush) + 10;
+            y = DrawMarkdownText(graphics, bodyText, safe.Left, y, width, shadowBrush, textBrush) + 10;
+            if (_editingBody) DrawBodyCaret(graphics, bodyText[..Math.Clamp(_editingCaretIndex, 0, bodyText.Length)], safe, bodyTop);
         }
-        else if (!string.IsNullOrWhiteSpace(_data.Text))
+        else if (!IsTodo && _editingBody)
         {
-            var measured = MeasureMarkdownLayout(graphics, _data.Text, width);
-            y += measured.Height + 10;
+            using var caretPen = new Pen(Color.FromArgb(235, 96, 205, 255), 2F);
+            graphics.DrawLine(caretPen, safe.Left, bodyTop, safe.Left, bodyTop + Math.Max(18, _font.Height));
         }
         _bodyTextBounds = Rectangle.FromLTRB(safe.Left, bodyTop, safe.Right, Math.Min(safe.Bottom, Math.Max(bodyTop + Math.Max(itemStep, 32), y)));
-        var ordered = _data.Items.OrderBy(value => value.Completed).ToList();
-        if (ordered.Count == 0)
+        var ordered = IsTodo ? _data.Items.OrderBy(value => value.Completed).ToList() : [];
+        if (IsTodo && ordered.Count == 0)
         {
             _addChecklistBounds = new Rectangle(safe.Left, y, Math.Max(28, itemStep), itemStep);
             DrawAddButton(graphics, _addChecklistBounds);
@@ -328,8 +348,9 @@ internal sealed class DesktopLayeredNoteForm : Form
             using var textBrush = new SolidBrush(_style.TextColor);
             using var shadowBrush = new SolidBrush(Color.FromArgb(210, 0, 0, 0));
             var itemBounds = new RectangleF(box.Right + 8, row.Y + Math.Max(0, (row.Height - font.Height) / 2F), Math.Max(1, row.Right - box.Right - 10), row.Height);
-            if (_editingChecklistItemId != item.Id)
-                DrawSimpleText(graphics, item.Text, font, itemBounds, shadowBrush, textBrush);
+            var itemText = _editingChecklistItemId == item.Id ? _editingText ?? "" : item.Text;
+            DrawSimpleText(graphics, itemText, font, itemBounds, shadowBrush, textBrush);
+            if (_editingChecklistItemId == item.Id) DrawChecklistCaret(graphics, itemText[..Math.Clamp(_editingCaretIndex, 0, itemText.Length)], font, itemBounds);
             _checkBounds.Add((item, row));
             _checkTextBounds[item.Id] = Rectangle.Ceiling(itemBounds);
             y += itemStep;
@@ -443,6 +464,56 @@ internal sealed class DesktopLayeredNoteForm : Form
         for (var i = 0; i < text.Length; i++) { var value = text[i].ToString(); graphics.DrawString(value, font, shadow, cursor + 1, bounds.Top + 1, StringFormat.GenericTypographic); graphics.DrawString(value, font, foreground, cursor, bounds.Top, StringFormat.GenericTypographic); cursor += widths[i] + extra; }
     }
 
+    private void DrawBodyCaret(Graphics graphics, string text, Rectangle bounds, int top)
+    {
+        var lines = text.Replace("\r", "").Split('\n');
+        var caretY = top;
+        List<MarkdownRun> lastWrapped = [];
+        Font? lastBaseFont = null;
+        try
+        {
+            for (var lineIndex = 0; lineIndex < lines.Length; lineIndex++)
+            {
+                var source = lines[lineIndex];
+                var parsed = MarkdownNoteRenderer.ParseLine(source);
+                lastBaseFont?.Dispose(); lastBaseFont = CreateMarkdownFont(parsed.HeadingLevel, FontStyle.Regular);
+                var wrapped = WrapRuns(graphics, BuildRuns(parsed), lastBaseFont, bounds.Width);
+                if (wrapped.Count == 0) wrapped.Add([]);
+                var step = Math.Max(_style.LineHeight, (int)Math.Ceiling(lastBaseFont.GetHeight(graphics)) + 4) + _style.LineSpacing;
+                if (lineIndex < lines.Length - 1) caretY += wrapped.Count * step;
+                else { caretY += Math.Max(0, wrapped.Count - 1) * step; lastWrapped = wrapped[^1]; }
+            }
+            var width = 0F;
+            foreach (var run in lastWrapped)
+            {
+                using var font = CreateRunFont(lastBaseFont ?? _font, run);
+                width += graphics.MeasureString(run.Text, font, PointF.Empty, StringFormat.GenericTypographic).Width;
+            }
+            var x = _style.TextAlignment switch
+            {
+                OverlayTextAlignment.Center => bounds.Left + Math.Max(0, (bounds.Width - width) / 2) + width,
+                OverlayTextAlignment.Right => bounds.Right,
+                _ => bounds.Left + Math.Min(bounds.Width, width)
+            };
+            using var pen = new Pen(Color.FromArgb(235, 96, 205, 255), 2F);
+            graphics.DrawLine(pen, x, caretY, x, caretY + Math.Max(18, lastBaseFont?.Height ?? _font.Height));
+        }
+        finally { lastBaseFont?.Dispose(); }
+    }
+
+    private void DrawChecklistCaret(Graphics graphics, string text, Font font, RectangleF bounds)
+    {
+        var width = graphics.MeasureString(text, font, PointF.Empty, StringFormat.GenericTypographic).Width;
+        var x = _style.TextAlignment switch
+        {
+            OverlayTextAlignment.Center => bounds.Left + Math.Max(0, (bounds.Width - width) / 2) + width,
+            OverlayTextAlignment.Right => bounds.Right,
+            _ => bounds.Left + Math.Min(bounds.Width, width)
+        };
+        using var pen = new Pen(Color.FromArgb(235, 96, 205, 255), 2F);
+        graphics.DrawLine(pen, x, bounds.Top, x, bounds.Top + Math.Max(18, font.Height));
+    }
+
     private void DrawAddButton(Graphics graphics, Rectangle bounds)
     {
         using var pen = new Pen(_style.TextColor, 2F); var cx = bounds.Left + bounds.Width / 2; var cy = bounds.Top + bounds.Height / 2;
@@ -501,44 +572,53 @@ internal sealed class DesktopLayeredNoteForm : Form
     private void BeginInlineBodyEdit()
     {
         CloseInlineEditor();
-        _editingBody = true; _editingChecklistItemId = null; RenderLayer();
+        _editingBody = true; _editingChecklistItemId = null; _editingText = _data.Text; _editingCaretIndex = _data.Text.Length; RenderEditingAtEnd();
         var local = Rectangle.Intersect(_bodyTextBounds, SafeContentBounds);
         if (local.Width <= 0 || local.Height <= 0) local = SafeContentBounds;
-        var editor = new InlineTextEditor(RectangleToScreen(local), _data.Text, _font, _style.TextColor, true);
+        var editor = new InlineTextEditor(RectangleToScreen(local).Location, _data.Text, true, _isFloating);
         _inlineEditor = editor;
+        editor.PreviewChanged += (value, caret) => { if (ReferenceEquals(_inlineEditor, editor)) { _editingText = value; _editingCaretIndex = caret; if (caret == value.Length) RenderEditingAtEnd(); else RenderLayer(); } };
         editor.Committed += value => { if (!ReferenceEquals(_inlineEditor, editor)) return; _data.Text = value.TrimEnd(); _scrollOffset = 0; FinishInlineEdit(editor); NoteChanged?.Invoke(this, EventArgs.Empty); };
         editor.Canceled += () => { if (ReferenceEquals(_inlineEditor, editor)) FinishInlineEdit(editor); };
-        editor.Show(this);
+        editor.Show();
+        if (!_isFloating) EnsureDesktopZOrder();
     }
 
     private void BeginInlineChecklistEdit(DesktopChecklistItem item, bool removeOnCancel)
     {
-        CloseInlineEditor(); _editingBody = false; _editingChecklistItemId = item.Id; RenderLayer();
+        CloseInlineEditor(); _editingBody = false; _editingChecklistItemId = item.Id; _editingText = item.Text; _editingCaretIndex = item.Text.Length; RenderLayer();
         if (!_checkTextBounds.TryGetValue(item.Id, out var local)) local = new Rectangle(SafeContentBounds.Left + 30, SafeContentBounds.Top, Math.Max(80, SafeContentBounds.Width - 30), Math.Max(28, _style.LineHeight));
         var screen = RectangleToScreen(local);
-        var editor = new InlineTextEditor(screen, item.Text, _font, _style.TextColor, false);
+        var editor = new InlineTextEditor(screen.Location, item.Text, false, _isFloating);
         _inlineEditor = editor;
+        editor.PreviewChanged += (value, caret) => { if (ReferenceEquals(_inlineEditor, editor)) { _editingText = value; _editingCaretIndex = caret; RenderLayer(); } };
         editor.Committed += value => { if (!ReferenceEquals(_inlineEditor, editor)) return; item.Text = value.Trim(); if (item.Text.Length == 0) _data.Items.Remove(item); _data.Items = _data.Items.OrderBy(value => value.Completed).ToList(); FinishInlineEdit(editor); NoteChanged?.Invoke(this, EventArgs.Empty); };
         editor.Canceled += () => { if (!ReferenceEquals(_inlineEditor, editor)) return; if (removeOnCancel) _data.Items.Remove(item); FinishInlineEdit(editor); if (removeOnCancel) NoteChanged?.Invoke(this, EventArgs.Empty); };
-        editor.Show(this);
+        editor.Show();
+        if (!_isFloating) EnsureDesktopZOrder();
     }
 
     private void FinishInlineEdit(InlineTextEditor editor)
     {
         if (ReferenceEquals(_inlineEditor, editor)) _inlineEditor = null;
-        _editingBody = false; _editingChecklistItemId = null; RenderLayer();
+        _editingBody = false; _editingChecklistItemId = null; _editingText = null; _editingCaretIndex = 0; RenderLayer();
+    }
+    private void RenderEditingAtEnd()
+    {
+        _scrollOffset = 0; RenderLayer();
+        _scrollOffset = Math.Max(0, _contentHeight - SafeContentBounds.Height); RenderLayer();
     }
     private void CloseInlineEditor()
     {
         if (_inlineEditor is { IsDisposed: false } editor) editor.Close();
-        _inlineEditor = null; _editingBody = false; _editingChecklistItemId = null;
+        _inlineEditor = null; _editingBody = false; _editingChecklistItemId = null; _editingText = null; _editingCaretIndex = 0; RenderLayer();
     }
     private bool IsResizeCorner(Point point) => (point.X < 18 || point.X >= ClientSize.Width - 18) && (point.Y < 18 || point.Y >= ClientSize.Height - 18);
 
     private void EditStyle()
     {
         var original = _style.Clone();
-        using var dialog = new OverlayStyleDialog(_style.Clone(), "便籤");
+        using var dialog = new OverlayStyleDialog(_style.Clone(), IsTodo ? "代辦清單" : "便籤");
         dialog.PreviewChanged += (_, _) => ApplyStyle(dialog.SelectedStyle, true);
         if (dialog.ShowDialog(this) == DialogResult.OK)
             ApplyStyle(dialog.SelectedStyle, true);
@@ -604,6 +684,8 @@ internal sealed class DesktopLayeredNoteForm : Form
         NoteChanged?.Invoke(this, EventArgs.Empty);
     }
 
+    private void EnsureDesktopZOrder() => SetWindowPos(Handle, new IntPtr(1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010);
+
     private void DrawPinButton(Graphics graphics)
     {
         using var background = new SolidBrush(Color.FromArgb(225, 30, 41, 59));
@@ -645,7 +727,13 @@ internal sealed class DesktopLayeredNoteForm : Form
 
     protected override void WndProc(ref Message message)
     {
-        const int WmNcHitTest = 0x0084, WmMoving = 0x0216, WmSizing = 0x0214, WmExitSizeMove = 0x0232;
+        const int WmNcHitTest = 0x0084, WmMouseActivate = 0x0021, WmMoving = 0x0216, WmSizing = 0x0214, WmExitSizeMove = 0x0232;
+        if (message.Msg == WmMouseActivate && !_isFloating)
+        {
+            message.Result = (IntPtr)3;
+            EnsureDesktopZOrder();
+            return;
+        }
         if (message.Msg == WmMoving && message.LParam != IntPtr.Zero)
         {
             var bounds = Marshal.PtrToStructure<NativeRect>(message.LParam).ToRectangle();

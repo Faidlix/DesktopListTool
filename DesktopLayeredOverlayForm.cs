@@ -68,6 +68,8 @@ internal sealed class DesktopLayeredOverlayForm : Form
     public bool IsFloating => _isFloating;
     internal IReadOnlyList<string> ContextMenuLabels => _menu?.Items.Cast<ToolStripItem>().Select(value => value.Text ?? "").ToArray() ?? [];
     internal IReadOnlyList<string> EntryPaths => _entries.Select(value => value.Path).ToArray();
+    internal bool UsesNoActivateForTest => (CreateParams.ExStyle & 0x08000000) != 0;
+    internal IntPtr MouseActivateResultForTest() { var message = Message.Create(Handle, 0x0021, IntPtr.Zero, IntPtr.Zero); WndProc(ref message); return message.Result; }
     internal bool OwnsScreenPointForTest(Point screenPoint) => WindowFromPoint(screenPoint) == Handle;
     internal void SetResizeCornerForTest(OverlayResizeCorner corner) { _resizeHoverCorner = corner; _frameVisible = true; RenderLayer(); }
     internal Func<DesktopLayeredOverlayForm, Rectangle, Rectangle>? ResolvePlacement;
@@ -134,13 +136,14 @@ internal sealed class DesktopLayeredOverlayForm : Form
         {
             const int WsExLayered = 0x00080000;
             const int WsExToolWindow = 0x00000080;
+            const int WsExNoActivate = 0x08000000;
             const int WsOverlappedWindow = 0x00CF0000;
             const int WsPopup = unchecked((int)0x80000000);
             const int WsExWindowEdge = 0x00000100;
             var parameters = base.CreateParams;
             parameters.Style = (parameters.Style & ~WsOverlappedWindow) | WsPopup;
             parameters.ExStyle &= ~WsExWindowEdge;
-            parameters.ExStyle |= WsExLayered | WsExToolWindow;
+            parameters.ExStyle |= WsExLayered | WsExToolWindow | WsExNoActivate;
             return parameters;
         }
     }
@@ -344,6 +347,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
 
     private void HandleMouseDown(object? sender, MouseEventArgs e)
     {
+        if (!_isFloating) EnsureDesktopZOrder();
         RevealFrame();
         if (e.Button == MouseButtons.Left && _isFloating && FloatingReturnButtonBounds.Contains(e.Location))
         {
@@ -766,7 +770,8 @@ internal sealed class DesktopLayeredOverlayForm : Form
         menu.Items.Add(pasteStyle);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("新增資料夾清單…", null, (_, _) => AddFolderRequested?.Invoke(this, EventArgs.Empty));
-        menu.Items.Add("新增便籤…", null, (_, _) => AddNoteRequested?.Invoke(this, new NoteRequestedEventArgs(_lastContextMenuScreenPoint)));
+        menu.Items.Add("新增便籤…", null, (_, _) => AddNoteRequested?.Invoke(this, new NoteRequestedEventArgs(_lastContextMenuScreenPoint, DesktopNoteKind.Note)));
+        menu.Items.Add("新增代辦清單…", null, (_, _) => AddNoteRequested?.Invoke(this, new NoteRequestedEventArgs(_lastContextMenuScreenPoint, DesktopNoteKind.Todo)));
         menu.Items.Add("變成懸浮視窗", null, (_, _) => MakeFloating());
         if (_folderPath is not null || _customList is not null)
             menu.Items.Add("關閉清單", null, (_, _) => CloseListRequested?.Invoke(this, EventArgs.Empty));
@@ -1275,11 +1280,18 @@ internal sealed class DesktopLayeredOverlayForm : Form
     protected override void WndProc(ref Message message)
     {
         const int WmNcHitTest = 0x0084;
+        const int WmMouseActivate = 0x0021;
         const int WmMoving = 0x0216;
         const int WmSizing = 0x0214;
         const int WmExitSizeMove = 0x0232;
         const int HtCaption = 2;
         const int HtBottomRight = 17;
+        if (message.Msg == WmMouseActivate && !_isFloating)
+        {
+            message.Result = (IntPtr)3;
+            EnsureDesktopZOrder();
+            return;
+        }
         if (message.Msg == WmMoving && message.LParam != IntPtr.Zero)
         {
             var movingBounds = Marshal.PtrToStructure<NativeRect>(message.LParam).ToRectangle();
@@ -1325,6 +1337,8 @@ internal sealed class DesktopLayeredOverlayForm : Form
         var workArea = Screen.FromRectangle(bounds).WorkingArea;
         return ConstrainRectangle(bounds, workArea);
     }
+
+    private void EnsureDesktopZOrder() => SetWindowPos(Handle, new IntPtr(1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010);
 
     public void SetBoundsWithoutSaving(Rectangle bounds)
     {
@@ -1458,9 +1472,10 @@ internal sealed class DesktopLayeredOverlayForm : Form
     [DllImport("user32.dll")] private static extern IntPtr GetParent(IntPtr window);
 }
 
-internal sealed class NoteRequestedEventArgs(Point screenLocation) : EventArgs
+internal sealed class NoteRequestedEventArgs(Point screenLocation, DesktopNoteKind kind) : EventArgs
 {
     public Point ScreenLocation { get; } = screenLocation;
+    public DesktopNoteKind Kind { get; } = kind;
 }
 
 internal sealed class CustomListRequestedEventArgs(string path, Point screenLocation) : EventArgs

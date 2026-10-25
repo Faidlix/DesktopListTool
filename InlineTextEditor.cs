@@ -1,6 +1,8 @@
-// 功能：在便籤原位置覆蓋無邊框文字輸入區，支援本文與單一勾選事項的直接編輯。
-// 使用：便籤本文或勾選事項雙擊開啟；Enter 確認、Esc 取消，本文以 Shift+Enter 換行。
-// 設定：由 DesktopLayeredNoteForm 提供畫面座標、字型、文字顏色與是否允許多行；背景以色鍵透明保留便籤原樣式。
+// 功能：以不可見鍵盤輸入宿主支援便籤與代辦原地編輯，畫面文字仍由原本的分層視窗繪製。
+// 使用：雙擊內容後接收輸入；Enter 確認、Esc 取消，便籤本文以 Shift+Enter 換行，失去焦點即取消。
+// 設定：固定桌面物件的輸入宿主保持在一般視窗後方；懸浮物件才使用置頂層級，且不建立額外捲動列。
+
+using System.Runtime.InteropServices;
 
 namespace DesktopListTool;
 
@@ -12,23 +14,30 @@ internal sealed class InlineTextEditor : Form
     private bool _finished;
     public event Action<string>? Committed;
     public event Action? Canceled;
+    public event Action<string, int>? PreviewChanged;
 
-    public InlineTextEditor(Rectangle screenBounds, string text, Font font, Color foreground, bool multiline)
+    public InlineTextEditor(Point screenAnchor, string text, bool multiline, bool floating)
     {
         _multiline = multiline;
         FormBorderStyle = FormBorderStyle.None; ShowInTaskbar = false; StartPosition = FormStartPosition.Manual;
-        Bounds = screenBounds; TopMost = true; BackColor = TransparentEditorColor; TransparencyKey = TransparentEditorColor;
+        Bounds = new Rectangle(screenAnchor, new Size(2, 2)); TopMost = floating; BackColor = TransparentEditorColor; TransparencyKey = TransparentEditorColor;
         _editor = new TextBox
         {
-            Dock = DockStyle.Fill, BorderStyle = BorderStyle.None, Multiline = multiline,
-            AcceptsReturn = multiline, AcceptsTab = false, ScrollBars = multiline ? ScrollBars.Vertical : ScrollBars.None,
-            Text = text, Font = new Font(font, font.Style), ForeColor = foreground, BackColor = TransparentEditorColor
+            Bounds = new Rectangle(0, 0, 1, 1), BorderStyle = BorderStyle.None, Multiline = multiline,
+            AcceptsReturn = multiline, AcceptsTab = false, ScrollBars = ScrollBars.None,
+            Text = text, ForeColor = TransparentEditorColor, BackColor = TransparentEditorColor
         };
         _editor.KeyDown += HandleKeyDown;
+        _editor.TextChanged += (_, _) => PublishPreview();
+        _editor.KeyUp += (_, e) => { if (e.KeyCode is Keys.Left or Keys.Right or Keys.Up or Keys.Down or Keys.Home or Keys.End or Keys.PageUp or Keys.PageDown) PublishPreview(); };
         Controls.Add(_editor);
-        Shown += (_, _) => { _editor.Focus(); _editor.SelectionStart = _editor.TextLength; _editor.SelectionLength = 0; };
+        Shown += (_, _) =>
+        {
+            _editor.Focus(); _editor.SelectionStart = _editor.TextLength; _editor.SelectionLength = 0;
+            if (!floating) SetWindowPos(Handle, new IntPtr(1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010);
+        };
         Deactivate += (_, _) => Cancel();
-        FormClosed += (_, _) => { if (!_finished) Cancel(); _editor.Font.Dispose(); };
+        FormClosed += (_, _) => { if (!_finished) Cancel(); };
     }
 
     private void HandleKeyDown(object? sender, KeyEventArgs e)
@@ -38,6 +47,8 @@ internal sealed class InlineTextEditor : Form
         if (_multiline && e.Shift) return;
         e.SuppressKeyPress = true; e.Handled = true; Commit();
     }
+
+    private void PublishPreview() => PreviewChanged?.Invoke(_editor.Text, Math.Clamp(_editor.SelectionStart, 0, _editor.TextLength));
 
     private void Commit()
     {
@@ -50,4 +61,7 @@ internal sealed class InlineTextEditor : Form
 
     internal static bool CommitsOnKey(Keys key, bool shift, bool multiline) => key == Keys.Enter && (!multiline || !shift);
     internal static bool CancelsOnKey(Keys key) => key == Keys.Escape;
+
+    [DllImport("user32.dll")]
+    private static extern bool SetWindowPos(IntPtr window, IntPtr insertAfter, int x, int y, int width, int height, uint flags);
 }

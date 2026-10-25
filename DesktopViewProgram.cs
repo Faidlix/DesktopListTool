@@ -150,7 +150,7 @@ internal sealed class DesktopViewApplicationContext : ApplicationContext
         _overlay = new DesktopLayeredOverlayForm(initialSize);
         _overlay.FormClosed += (_, _) => ExitThread();
         _overlay.AddFolderRequested += (_, _) => ChooseFolder();
-        _overlay.AddNoteRequested += (_, e) => CreateNote(e.ScreenLocation);
+        _overlay.AddNoteRequested += (_, e) => CreateNote(e.ScreenLocation, e.Kind);
         AttachPlacementAndCustomListEvents(_overlay);
         _commandEvents = OverlayMessenger.CreateCommandEvents();
         _registeredWaits =
@@ -200,6 +200,7 @@ internal sealed class DesktopViewApplicationContext : ApplicationContext
         CustomListSettings.Save(_customLists);
         RefreshDetachedDesktopItems();
         _notes.AddRange(DesktopNotesSettings.Load());
+        NormalizeLegacyNotes(_notes);
         foreach (var note in _notes)
             ShowNote(note);
         SaveNotes();
@@ -216,6 +217,31 @@ internal sealed class DesktopViewApplicationContext : ApplicationContext
             folderOverlay.SetItemSize(size);
         foreach (var customOverlay in _customOverlays)
             customOverlay.SetItemSize(size);
+    }
+
+    internal static void NormalizeLegacyNotes(List<DesktopNoteData> notes)
+    {
+        var companions = new List<DesktopNoteData>();
+        foreach (var note in notes.Where(value => value.Kind is null).ToArray())
+        {
+            var hasText = !string.IsNullOrWhiteSpace(note.Text);
+            var hasTasks = note.Items.Count > 0;
+            if (hasText && hasTasks)
+            {
+                var todo = note.CreateCompanion(DesktopNoteKind.Todo, new Point(28, 28));
+                todo.Text = "";
+                companions.Add(todo);
+                note.Items = [];
+                note.Kind = DesktopNoteKind.Note;
+            }
+            else
+            {
+                note.Kind = hasTasks ? DesktopNoteKind.Todo : DesktopNoteKind.Note;
+                if (note.Kind == DesktopNoteKind.Todo) note.Text = "";
+                else note.Items = [];
+            }
+        }
+        notes.AddRange(companions);
     }
 
     private void WriteQaLayoutIfRequested()
@@ -263,7 +289,7 @@ internal sealed class DesktopViewApplicationContext : ApplicationContext
         var defaultBounds = new Rectangle(_overlay.Left + offset, _overlay.Top + offset, Math.Max(360, _overlay.Width), Math.Min(640, _overlay.Height));
         var folderOverlay = new DesktopLayeredOverlayForm(ListItemSizeSettings.Load(), fullPath, defaultBounds);
         folderOverlay.AddFolderRequested += (_, _) => ChooseFolder();
-        folderOverlay.AddNoteRequested += (_, e) => CreateNote(e.ScreenLocation);
+        folderOverlay.AddNoteRequested += (_, e) => CreateNote(e.ScreenLocation, e.Kind);
         folderOverlay.CloseListRequested += (_, _) => CloseFolderOverlay(folderOverlay);
         AttachPlacementAndCustomListEvents(folderOverlay);
         folderOverlay.FormClosed += (_, _) => _folderOverlays.Remove(folderOverlay);
@@ -310,7 +336,7 @@ internal sealed class DesktopViewApplicationContext : ApplicationContext
         }
         var overlay = new DesktopLayeredOverlayForm(ListItemSizeSettings.Load(), defaultBounds: defaultBounds, customList: data);
         overlay.AddFolderRequested += (_, _) => ChooseFolder();
-        overlay.AddNoteRequested += (_, e) => CreateNote(e.ScreenLocation);
+        overlay.AddNoteRequested += (_, e) => CreateNote(e.ScreenLocation, e.Kind);
         overlay.CloseListRequested += (_, _) => CloseCustomListOverlay(overlay, data);
         overlay.CustomPathsChanged += (_, _) => { CustomListSettings.Save(_customLists); RefreshDetachedDesktopItems(); };
         AttachPlacementAndCustomListEvents(overlay);
@@ -496,9 +522,9 @@ internal sealed class DesktopViewApplicationContext : ApplicationContext
         return best ?? candidate;
     }
 
-    private void CreateNote(Point screenLocation)
+    private void CreateNote(Point screenLocation, DesktopNoteKind kind)
     {
-        using var editor = new NoteEditorDialog();
+        using var editor = new NoteEditorDialog(kind);
         if (editor.ShowDialog() != DialogResult.OK)
             return;
         if (string.IsNullOrWhiteSpace(editor.NoteText) && editor.ChecklistItems.Count == 0)
@@ -506,6 +532,7 @@ internal sealed class DesktopViewApplicationContext : ApplicationContext
 
         var note = new DesktopNoteData
         {
+            Kind = kind,
             Text = editor.NoteText.TrimEnd(),
             Items = editor.ChecklistItems.ToList(),
             Bounds = new Rectangle(screenLocation.X, screenLocation.Y, 340, 260)
@@ -523,7 +550,7 @@ internal sealed class DesktopViewApplicationContext : ApplicationContext
         var form = new DesktopLayeredNoteForm(note);
         form.EditRequested += (_, _) => EditNote(form);
         form.DeleteRequested += (_, _) => DeleteNote(form);
-        form.AddNoteRequested += (_, e) => CreateNote(e.ScreenLocation);
+        form.AddNoteRequested += (_, e) => CreateNote(e.ScreenLocation, e.Kind);
         form.NoteChanged += (_, _) => SaveNotes();
         form.ResolvePlacement = (sender, candidate) => FindFreePlacement(candidate, sender);
         form.PlacementPreview = PreviewPlacement;
@@ -536,7 +563,8 @@ internal sealed class DesktopViewApplicationContext : ApplicationContext
 
     private void EditNote(DesktopLayeredNoteForm form)
     {
-        using var editor = new NoteEditorDialog(form.Data);
+        var kind = form.Data.Kind ?? DesktopNoteKind.Note;
+        using var editor = new NoteEditorDialog(kind, form.Data);
         if (editor.ShowDialog(form) != DialogResult.OK)
             return;
         form.ApplyEditedContent(editor.NoteText, editor.ChecklistItems);
@@ -1295,7 +1323,8 @@ internal static class SmokeTests
             using (var overlayConstruction = new DesktopLayeredOverlayForm(ListItemSize.Standard))
             {
                 Assert(overlayConstruction.Width >= overlayConstruction.MinimumSize.Width, "overlay constructs before resize callbacks");
-                Assert(overlayConstruction.ContextMenuLabels.Contains("複製樣式") && overlayConstruction.ContextMenuLabels.Contains("貼上樣式") && overlayConstruction.ContextMenuLabels.Contains("變成桌面圖示樣式"), "list menu exposes style copy, paste and icon mode");
+                Assert(overlayConstruction.ContextMenuLabels.Contains("新增便籤…") && overlayConstruction.ContextMenuLabels.Contains("新增代辦清單…") && overlayConstruction.ContextMenuLabels.Contains("複製樣式") && overlayConstruction.ContextMenuLabels.Contains("貼上樣式") && overlayConstruction.ContextMenuLabels.Contains("變成桌面圖示樣式"), "list menu exposes separate note, todo, style and icon actions");
+                Assert(overlayConstruction.UsesNoActivateForTest && overlayConstruction.MouseActivateResultForTest() == (IntPtr)3, "fixed lists reject mouse activation and stay in the desktop z-order");
                 var detachable = overlayConstruction.EntryPaths.FirstOrDefault(value => value != DesktopOverlayEntry.RecycleBinPath);
                 if (detachable is not null) { overlayConstruction.SetExcludedPaths([detachable]); Assert(!overlayConstruction.EntryPaths.Contains(detachable, StringComparer.OrdinalIgnoreCase), "detached desktop item is hidden from main list"); overlayConstruction.SetExcludedPaths([]); }
             }
@@ -1403,16 +1432,20 @@ internal static class SmokeTests
                 var controls = noteAppearance.Controls.Cast<Control>().SelectMany(Descendants).ToArray();
                 Assert(controls.OfType<SliderNumberControl>().Count() == 5, "note style omits the list-only horizontal-spacing slider");
             }
+            using (var todoAppearance = new OverlayStyleDialog(new OverlayStyleOptions(), "代辦清單"))
+            {
+                var controls = todoAppearance.Controls.Cast<Control>().SelectMany(Descendants).ToArray();
+                Assert(controls.OfType<SliderNumberControl>().Count() == 5, "todo style also omits the file-list-only horizontal-spacing slider");
+            }
 
             Assert(InlineTextEditor.CommitsOnKey(Keys.Enter, shift: false, multiline: true) &&
                 !InlineTextEditor.CommitsOnKey(Keys.Enter, shift: true, multiline: true) &&
                 InlineTextEditor.CancelsOnKey(Keys.Escape), "inline note editing uses Enter to confirm, Shift+Enter for newline and Esc to cancel");
-            using (var inlineFont = new Font("Microsoft JhengHei UI", 10F))
-            using (var inlineEditor = new InlineTextEditor(new Rectangle(0, 0, 320, 120), "原樣式", inlineFont, Color.White, true))
+            using (var inlineEditor = new InlineTextEditor(Point.Empty, "原樣式", true, false))
             {
                 var textInput = inlineEditor.Controls.OfType<TextBox>().Single();
-                Assert(inlineEditor.TransparencyKey == inlineEditor.BackColor && textInput.BackColor == inlineEditor.TransparencyKey && textInput.BorderStyle == BorderStyle.None,
-                    "inline note editor keeps the underlying note background visible without a system-colored border");
+                Assert(inlineEditor.Size == new Size(2, 2) && inlineEditor.TransparencyKey == inlineEditor.BackColor && textInput.ScrollBars == ScrollBars.None,
+                    "inline note editor is only a hidden keyboard host and adds no system background or scrollbar");
             }
 
             using (var colorAlpha = new ColorWithAlphaDialog(Color.Black, 64))
@@ -1479,6 +1512,7 @@ internal static class SmokeTests
 
             var note = new DesktopNoteData
             {
+                Kind = DesktopNoteKind.Note,
                 Text = "## 每週回顧\r\n**完成：** Markdown 顯示與安全圓角\r\n- 第一個項目\r\n- 第二個項目\r\n> 這是一段引言\r\n`inline code` 與 [連結](https://example.invalid)\r\n第七行用來確認內容超出時可捲動\r\n第八行仍需保留",
                 X = 40, Y = 40, Width = 420, Height = 180, CornerRadius = 42,
                 GradientEnabled = true, GradientColorArgb = Color.DarkOrange.ToArgb(), GradientOpacity = 120, GradientDirection = OverlayGradientDirection.DiagonalDown, GradientMode = OverlayGradientMode.Edges,
@@ -1487,13 +1521,11 @@ internal static class SmokeTests
             if (Environment.GetEnvironmentVariable("DESKTOP_LIST_QA_STRAIGHT_RESIZE") == "1") note.CornerRadius = 0;
             var markdown = MarkdownNoteRenderer.ParseLine("## **標題**與[連結](https://example.invalid)");
             Assert(markdown.HeadingLevel == 2 && markdown.Runs.Any(value => value.Style.HasFlag(FontStyle.Bold)) && markdown.Runs.Any(value => value.Style.HasFlag(FontStyle.Underline)), "Markdown formatting parses");
-            using (var editor = new NoteEditorDialog(note))
+            using (var editor = new NoteEditorDialog(DesktopNoteKind.Note, note))
             {
                 Assert(editor.AcceptButton is null, "note editor Enter does not confirm");
                 var descendants = editor.Controls.Cast<Control>().SelectMany(value => new[] { value }.Concat(Descendants(value))).ToArray();
-                Assert(descendants.OfType<SplitContainer>().Any(), "note editor text and checklist ranges are adjustable");
-                var addButton = descendants.OfType<Button>().Single(value => value.Text.Contains("新增勾選事項"));
-                Assert(addButton.AutoSize && addButton.Width >= addButton.PreferredSize.Width, "add checklist label is not clipped");
+                Assert(!descendants.OfType<Button>().Any(value => value.Text.Contains("新增勾選事項")), "plain note editor does not contain a checklist add button");
                 var editorQa = Environment.GetEnvironmentVariable("DESKTOP_LIST_QA_EDITOR_PATH");
                 if (!string.IsNullOrWhiteSpace(editorQa))
                 {
@@ -1503,21 +1535,48 @@ internal static class SmokeTests
             }
             using (var noteForm = new DesktopLayeredNoteForm(note))
             {
-                Assert(noteForm.ContextMenuLabels.Contains("新增便籤…") && noteForm.ContextMenuLabels.Contains("樣式…") && noteForm.ContextMenuLabels.Contains("複製樣式") && noteForm.ContextMenuLabels.Contains("貼上樣式"), "note menu exposes note and style actions");
-                noteForm.ApplyEditedContent(note.Text,
-                [
-                    new DesktopChecklistItem { Text = "已完成", Completed = true },
-                    new DesktopChecklistItem { Text = "待完成", Completed = false }
-                ]);
-                Assert(note.Items.Count == 2 && !note.Items[0].Completed && note.Items[1].Completed, "completed checklist moves to bottom");
+                Assert(noteForm.ContextMenuLabels.Contains("新增便籤…") && noteForm.ContextMenuLabels.Contains("新增代辦清單…") && noteForm.ContextMenuLabels.Contains("樣式…") && noteForm.ContextMenuLabels.Contains("複製樣式") && noteForm.ContextMenuLabels.Contains("貼上樣式"), "note menu exposes separate note, todo and style actions");
+                Assert(noteForm.UsesNoActivateForTest && noteForm.MouseActivateResultForTest() == (IntPtr)3, "fixed notes reject mouse activation and stay in the desktop z-order");
+                noteForm.RenderForTest(); Assert(!noteForm.HasAddChecklistButtonForTest, "plain note rendering has no checklist add button");
                 if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("DESKTOP_LIST_QA_NOTE_PATH")))
                 {
                     noteForm.SetResizeCornerForTest(OverlayResizeCorner.BottomRight);
                     noteForm.StartPosition = FormStartPosition.Manual; noteForm.Location = new Point(-10000, -10000); noteForm.Show(); Application.DoEvents();
                     Assert(noteForm.HasScrollableContent, "small note retains overflow content"); noteForm.ScrollForTest(120); Assert(noteForm.ScrollOffset > 0, "small note scrolls vertically"); noteForm.Hide();
                 }
+                var inlineQa = Environment.GetEnvironmentVariable("DESKTOP_LIST_QA_INLINE_NOTE_PATH");
+                if (!string.IsNullOrWhiteSpace(inlineQa))
+                {
+                    Environment.SetEnvironmentVariable("DESKTOP_LIST_QA_NOTE_PATH", inlineQa);
+                    noteForm.SetInlineDraftForTest(note.Text + "\r\n正在以原樣式編輯");
+                    Environment.SetEnvironmentVariable("DESKTOP_LIST_QA_INLINE_NOTE_PATH", null);
+                }
             }
-            var distributedNote = new DesktopNoteData { Text = "第一行\r\n第二行", X = 40, Y = 40, Width = 500, Height = 420, Distribution = OverlayContentDistribution.Fill };
+            var todo = new DesktopNoteData { Kind = DesktopNoteKind.Todo, X = 80, Y = 80, Width = 420, Height = 240 };
+            using (var todoEditor = new NoteEditorDialog(DesktopNoteKind.Todo, todo))
+            {
+                var descendants = todoEditor.Controls.Cast<Control>().SelectMany(value => new[] { value }.Concat(Descendants(value))).ToArray();
+                var addButton = descendants.OfType<Button>().Single(value => value.Text.Contains("新增勾選事項"));
+                Assert(addButton.AutoSize && addButton.Width >= addButton.PreferredSize.Width, "todo editor has an unclipped checklist add button");
+                Assert(!descendants.OfType<Label>().Any(value => value.Text.Contains("Markdown")), "todo editor does not contain note text input");
+            }
+            using (var todoForm = new DesktopLayeredNoteForm(todo))
+            {
+                todoForm.ApplyEditedContent("", [new DesktopChecklistItem { Text = "已完成", Completed = true }, new DesktopChecklistItem { Text = "待完成", Completed = false }]);
+                Assert(todo.Items.Count == 2 && !todo.Items[0].Completed && todo.Items[1].Completed, "completed todo item moves to bottom");
+                todoForm.RenderForTest(); Assert(todoForm.HasAddChecklistButtonForTest, "todo rendering keeps the checklist add button");
+                var todoQa = Environment.GetEnvironmentVariable("DESKTOP_LIST_QA_TODO_PATH");
+                if (!string.IsNullOrWhiteSpace(todoQa))
+                {
+                    Environment.SetEnvironmentVariable("DESKTOP_LIST_QA_NOTE_PATH", todoQa);
+                    todoForm.StartPosition = FormStartPosition.Manual; todoForm.Location = new Point(-10000, -10000); todoForm.Show(); Application.DoEvents(); todoForm.Hide();
+                    Environment.SetEnvironmentVariable("DESKTOP_LIST_QA_TODO_PATH", null);
+                }
+            }
+            var legacy = new List<DesktopNoteData> { new() { Text = "舊便籤", Items = [new DesktopChecklistItem { Text = "舊代辦" }] } };
+            DesktopViewApplicationContext.NormalizeLegacyNotes(legacy);
+            Assert(legacy.Count == 2 && legacy.Any(value => value.Kind == DesktopNoteKind.Note && value.Text == "舊便籤" && value.Items.Count == 0) && legacy.Any(value => value.Kind == DesktopNoteKind.Todo && value.Text.Length == 0 && value.Items.Count == 1), "legacy mixed note splits into separate note and todo without data loss");
+            var distributedNote = new DesktopNoteData { Kind = DesktopNoteKind.Note, Text = "第一行\r\n第二行", X = 40, Y = 40, Width = 500, Height = 420, Distribution = OverlayContentDistribution.Fill };
             using (var distributedForm = new DesktopLayeredNoteForm(distributedNote))
             {
                 distributedForm.RenderForTest();
