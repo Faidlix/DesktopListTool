@@ -1005,13 +1005,13 @@ internal sealed class DesktopLayeredOverlayForm : Form
             if (!Clipboard.ContainsFileDropList()) return;
             var paths = Clipboard.GetFileDropList().Cast<string>().Where(path => File.Exists(path) || Directory.Exists(path)).ToArray();
             if (paths.Length == 0) return;
+            var move = GetClipboardPreferredDropEffect() == DragDropEffects.Move;
             if (_customList is not null)
             {
                 AddReferencePaths(paths);
-                Clipboard.Clear();
+                if (move) Clipboard.Clear();
                 return;
             }
-            var move = GetClipboardPreferredDropEffect() == DragDropEffects.Move;
             TransferPaths(paths, _folderPath ?? Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), copy: !move);
             PhysicalPathsChanged?.Invoke(this, EventArgs.Empty);
             ReloadItems();
@@ -1058,7 +1058,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
             ReloadItems();
             PhysicalPathsChanged?.Invoke(this, EventArgs.Empty);
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or OperationCanceledException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or OperationCanceledException or InvalidOperationException)
         {
             MessageBox.Show(ex.Message, "無法移至資源回收筒", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
@@ -1106,6 +1106,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
         data.SetData("DesktopListTool.SourcePath", draggedPath);
         data.SetData("DesktopListTool.SourceListIdentity", DragIdentity);
         var effect = DoDragDrop(data, DragDropEffects.Move | DragDropEffects.Copy);
+        var physicalMoveCompleted = data.TryGetData<bool>("DesktopListTool.PhysicalMoveCompleted", out var moved) && moved;
         if (effect == DragDropEffects.None && _dragOriginalOrder is not null)
         {
             _entries.Clear();
@@ -1119,13 +1120,15 @@ internal sealed class DesktopLayeredOverlayForm : Form
             CreateCustomListRequested?.Invoke(this, new CustomListRequestedEventArgs(draggedPath, dropPoint));
         if (effect != DragDropEffects.None)
         {
-            if (_customList is not null && effect == DragDropEffects.Move && !Bounds.Contains(dropPoint))
+            if (_customList is not null && ShouldRemoveSourceReference(effect, physicalMoveCompleted, !Bounds.Contains(dropPoint)))
             {
                 _customList.Paths.RemoveAll(path => string.Equals(path, draggedPath, StringComparison.OrdinalIgnoreCase));
                 var becameEmpty = _customList.Paths.Count == 0;
                 CustomPathsChanged?.Invoke(this, EventArgs.Empty);
                 if (becameEmpty) { CloseListRequested?.Invoke(this, EventArgs.Empty); return; }
             }
+            else if (physicalMoveCompleted && _referencePaths.Remove(draggedPath))
+                OverlayOrderSettings.SaveReferencePaths(SettingsIdentity, _referencePaths);
             ReloadItems();
         }
     }
@@ -1151,6 +1154,9 @@ internal sealed class DesktopLayeredOverlayForm : Form
     internal static bool IsCrossListReferenceDrop(string? sourceIdentity, string targetIdentity, bool hasPhysicalTarget) =>
         !hasPhysicalTarget && !string.IsNullOrWhiteSpace(sourceIdentity) &&
         !string.Equals(sourceIdentity, targetIdentity, StringComparison.Ordinal);
+
+    internal static bool ShouldRemoveSourceReference(DragDropEffects effect, bool physicalMoveCompleted, bool droppedOutsideSource) =>
+        effect == DragDropEffects.Move && (physicalMoveCompleted || droppedOutsideSource);
 
     private void HandleDragEnter(object? sender, DragEventArgs e) => UpdateDragTarget(e);
 
@@ -1259,8 +1265,11 @@ internal sealed class DesktopLayeredOverlayForm : Form
                 if (_dropTargetPath is null) return;
                 if (_dropIsRecycleBin)
                 {
-                    MovePathsToRecycleBin(paths);
-                    PhysicalPathsChanged?.Invoke(this, EventArgs.Empty);
+                    if (MovePathsToRecycleBin(paths))
+                    {
+                        e.Data?.SetData("DesktopListTool.PhysicalMoveCompleted", true);
+                        PhysicalPathsChanged?.Invoke(this, EventArgs.Empty);
+                    }
                 }
                 else if (_dropIsArchive)
                 {
@@ -1269,8 +1278,12 @@ internal sealed class DesktopLayeredOverlayForm : Form
                 }
                 else
                 {
-                    TransferPaths(paths, _dropTargetPath, e.Effect == DragDropEffects.Copy);
-                    PhysicalPathsChanged?.Invoke(this, EventArgs.Empty);
+                    var changed = TransferPaths(paths, _dropTargetPath, e.Effect == DragDropEffects.Copy);
+                    if (changed)
+                    {
+                        if (e.Effect == DragDropEffects.Move) e.Data?.SetData("DesktopListTool.PhysicalMoveCompleted", true);
+                        PhysicalPathsChanged?.Invoke(this, EventArgs.Empty);
+                    }
                 }
             }
             else if (_dropIsCrossListReference)
@@ -1301,8 +1314,12 @@ internal sealed class DesktopLayeredOverlayForm : Form
             }
             else
             {
-                TransferPaths(paths, _folderPath ?? Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), e.Effect == DragDropEffects.Copy);
-                PhysicalPathsChanged?.Invoke(this, EventArgs.Empty);
+                var changed = TransferPaths(paths, _folderPath ?? Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), e.Effect == DragDropEffects.Copy);
+                if (changed)
+                {
+                    if (e.Effect == DragDropEffects.Move) e.Data?.SetData("DesktopListTool.PhysicalMoveCompleted", true);
+                    PhysicalPathsChanged?.Invoke(this, EventArgs.Empty);
+                }
             }
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or OperationCanceledException or InvalidOperationException)
@@ -1316,9 +1333,10 @@ internal sealed class DesktopLayeredOverlayForm : Form
         }
     }
 
-    internal static void TransferPaths(IEnumerable<string> paths, string destinationDirectory, bool copy,
+    internal static bool TransferPaths(IEnumerable<string> paths, string destinationDirectory, bool copy,
         Func<string, string, bool>? sameVolumeResolver = null)
     {
+        var changed = false;
         Directory.CreateDirectory(destinationDirectory);
         foreach (var source in paths)
         {
@@ -1336,7 +1354,9 @@ internal sealed class DesktopLayeredOverlayForm : Form
             }
             else if (copy) File.Copy(source, destination);
             else MovePath(source, destination, isDirectory: false, sameVolumeResolver);
+            changed = true;
         }
+        return changed;
     }
 
     private void AddReferencePaths(IEnumerable<string> paths)
@@ -1356,15 +1376,23 @@ internal sealed class DesktopLayeredOverlayForm : Form
 
     internal void AddReferencePathsForTest(IEnumerable<string> paths) => AddReferencePaths(paths);
 
-    internal static void MovePathsToRecycleBin(IEnumerable<string> paths)
+    internal static bool MovePathsToRecycleBin(IEnumerable<string> paths)
     {
+        var changed = false;
         foreach (var path in paths.Where(value => !string.Equals(value, DesktopOverlayEntry.RecycleBinPath, StringComparison.OrdinalIgnoreCase)))
         {
             if (Directory.Exists(path))
+            {
                 Microsoft.VisualBasic.FileIO.FileSystem.DeleteDirectory(path, Microsoft.VisualBasic.FileIO.UIOption.OnlyErrorDialogs, Microsoft.VisualBasic.FileIO.RecycleOption.SendToRecycleBin);
+                changed = true;
+            }
             else if (File.Exists(path))
+            {
                 Microsoft.VisualBasic.FileIO.FileSystem.DeleteFile(path, Microsoft.VisualBasic.FileIO.UIOption.OnlyErrorDialogs, Microsoft.VisualBasic.FileIO.RecycleOption.SendToRecycleBin);
+                changed = true;
+            }
         }
+        return changed;
     }
 
     private static void MovePath(string source, string destination, bool isDirectory,

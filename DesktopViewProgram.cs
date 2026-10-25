@@ -1348,6 +1348,9 @@ internal static class SmokeTests
             Assert(DesktopLayeredOverlayForm.IsCrossListReferenceDrop("custom:source", "custom:target", hasPhysicalTarget: false) &&
                 !DesktopLayeredOverlayForm.IsCrossListReferenceDrop("custom:source", "custom:target", hasPhysicalTarget: true) &&
                 !DesktopLayeredOverlayForm.IsCrossListReferenceDrop("custom:same", "custom:same", hasPhysicalTarget: false), "cross-list blank drops preserve the source while physical targets take priority");
+            Assert(DesktopLayeredOverlayForm.ShouldRemoveSourceReference(DragDropEffects.Move, physicalMoveCompleted: true, droppedOutsideSource: false) &&
+                DesktopLayeredOverlayForm.ShouldRemoveSourceReference(DragDropEffects.Move, physicalMoveCompleted: false, droppedOutsideSource: true) &&
+                !DesktopLayeredOverlayForm.ShouldRemoveSourceReference(DragDropEffects.Copy, physicalMoveCompleted: true, droppedOutsideSource: true), "physical moves remove stale references even when overlapping lists share the drop point, while copies retain them");
             Assert(ShortcutKeyHost.IsSupportedShortcut(Keys.C, control: true) && ShortcutKeyHost.IsSupportedShortcut(Keys.X, control: true) &&
                 ShortcutKeyHost.IsSupportedShortcut(Keys.V, control: true) && ShortcutKeyHost.IsSupportedShortcut(Keys.Delete, control: false) &&
                 !ShortcutKeyHost.IsSupportedShortcut(Keys.Delete, control: true), "selected list items support copy, cut, paste and delete shortcuts");
@@ -1513,10 +1516,11 @@ internal static class SmokeTests
                 Directory.CreateDirectory(source);
                 var file = Path.Combine(source, "drag.txt");
                 File.WriteAllText(file, "drag-copy-move");
-                DesktopLayeredOverlayForm.TransferPaths([file], copyTarget, copy: true);
+                Assert(DesktopLayeredOverlayForm.TransferPaths([file], copyTarget, copy: true), "copy reports a physical change");
                 Assert(File.Exists(Path.Combine(copyTarget, "drag.txt")) && File.Exists(file), "ctrl drag copies file");
-                DesktopLayeredOverlayForm.TransferPaths([file], moveTarget, copy: false);
+                Assert(DesktopLayeredOverlayForm.TransferPaths([file], moveTarget, copy: false), "move reports a physical change");
                 Assert(File.Exists(Path.Combine(moveTarget, "drag.txt")) && !File.Exists(file), "drag moves file");
+                Assert(!DesktopLayeredOverlayForm.TransferPaths([Path.Combine(moveTarget, "drag.txt")], moveTarget, copy: false), "dropping onto the same physical folder is a no-op and keeps its list reference");
                 Assert(DesktopLayeredOverlayForm.HaveSameVolumeRoot(@"C:\source\file.txt", @"C:\target\file.txt") &&
                     !DesktopLayeredOverlayForm.HaveSameVolumeRoot(@"C:\source\file.txt", @"D:\target\file.txt"), "cross-volume roots are detected before moving");
                 var forcedSource = Path.Combine(transferRoot, "forced-source");
