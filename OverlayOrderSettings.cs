@@ -7,9 +7,28 @@ using Microsoft.Win32;
 namespace DesktopListTool;
 
 internal enum OverlaySortMode { Custom, Name, Type, Size, Modified }
+internal enum OverlayDisplayMode { List, Icons }
 
 internal static class OverlayOrderSettings
 {
+    public static OverlayDisplayMode LoadDisplayMode(string? identity)
+    {
+        try
+        {
+            using var profileKey = Registry.CurrentUser.OpenSubKey(OverlaySettings.GetSettingsKey(identity));
+            using var legacyKey = profileKey?.GetValue("DisplayMode") is string ? null : Registry.CurrentUser.OpenSubKey(OverlaySettings.GetLegacySettingsKey(identity));
+            var value = (profileKey?.GetValue("DisplayMode") ?? legacyKey?.GetValue("DisplayMode")) as string;
+            return Enum.TryParse<OverlayDisplayMode>(value, out var mode) ? mode : OverlayDisplayMode.List;
+        }
+        catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException) { return OverlayDisplayMode.List; }
+    }
+
+    public static void SaveDisplayMode(string? identity, OverlayDisplayMode mode)
+    {
+        try { using var key = Registry.CurrentUser.CreateSubKey(OverlaySettings.GetSettingsKey(identity)); key.SetValue("DisplayMode", mode.ToString(), RegistryValueKind.String); }
+        catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException) { }
+    }
+
     public static (OverlaySortMode Mode, bool Ascending) LoadSort(string? folderPath)
     {
         try

@@ -139,7 +139,6 @@ internal sealed class DesktopViewApplicationContext : ApplicationContext
     private readonly EventWaitHandle[] _commandEvents;
     private readonly RegisteredWaitHandle[] _registeredWaits;
     private readonly DesktopBlankClickMonitor _blankClickMonitor;
-    private readonly Dictionary<Form, Rectangle> _temporaryDisplacementOrigins = [];
     private Form? _activePlacementSource;
     private Rectangle _activePlacementOrigin;
 
@@ -414,25 +413,8 @@ internal sealed class DesktopViewApplicationContext : ApplicationContext
         if (IsFloatingSurface(source)) return;
         if (_activePlacementSource != source)
         {
-            RestoreTemporaryDisplacements();
             _activePlacementSource = source;
             _activePlacementOrigin = source.Bounds;
-        }
-        else
-        {
-            RestoreTemporaryDisplacements(clearTransaction: false);
-        }
-
-        var surfaces = AllDesktopSurfaces()
-            .Where(value => value != source && !value.IsDisposed && !IsFloatingSurface(value))
-            .ToArray();
-        var originalBounds = surfaces.Select(value => value.Bounds).ToArray();
-        var planned = PlanTemporaryDisplacements(candidate, Screen.FromRectangle(candidate).WorkingArea, originalBounds);
-        foreach (var (index, bounds) in planned)
-        {
-            var form = surfaces[index];
-            _temporaryDisplacementOrigins[form] = originalBounds[index];
-            SetSurfaceBoundsWithoutSaving(form, bounds);
         }
     }
 
@@ -441,28 +423,26 @@ internal sealed class DesktopViewApplicationContext : ApplicationContext
         if (_activePlacementSource != source) return;
         if (source.Bounds == _activePlacementOrigin)
         {
-            RestoreTemporaryDisplacements();
+            _activePlacementSource = null;
             return;
         }
-        foreach (var form in _temporaryDisplacementOrigins.Keys.Where(value => !value.IsDisposed))
+        var surfaces = AllDesktopSurfaces()
+            .Where(value => value != source && !value.IsDisposed && !IsFloatingSurface(value))
+            .ToArray();
+        var originalBounds = surfaces.Select(value => value.Bounds).ToArray();
+        var planned = PlanReleaseDisplacements(source.Bounds, Screen.FromRectangle(source.Bounds).WorkingArea, originalBounds);
+        foreach (var (index, bounds) in planned)
         {
+            var form = surfaces[index];
+            SetSurfaceBoundsWithoutSaving(form, bounds);
             if (form is DesktopLayeredOverlayForm overlay) overlay.PersistState();
             else if (form is DesktopLayeredNoteForm note) note.PersistState();
         }
-        _temporaryDisplacementOrigins.Clear();
         _activePlacementSource = null;
         SaveNotes();
     }
 
-    private void RestoreTemporaryDisplacements(bool clearTransaction = true)
-    {
-        foreach (var (form, bounds) in _temporaryDisplacementOrigins.ToArray())
-            if (!form.IsDisposed) SetSurfaceBoundsWithoutSaving(form, bounds);
-        _temporaryDisplacementOrigins.Clear();
-        if (clearTransaction) _activePlacementSource = null;
-    }
-
-    internal static Dictionary<int, Rectangle> PlanTemporaryDisplacements(Rectangle moving, Rectangle workArea, IReadOnlyList<Rectangle> stationary)
+    internal static Dictionary<int, Rectangle> PlanReleaseDisplacements(Rectangle moving, Rectangle workArea, IReadOnlyList<Rectangle> stationary)
     {
         var current = stationary.ToArray();
         var result = new Dictionary<int, Rectangle>();
@@ -1284,12 +1264,14 @@ internal static class SmokeTests
                 try
                 {
                     OverlaySettings.SaveBounds(stateIdentity, sampleBounds); OverlaySettings.SaveFloating(stateIdentity, true);
-                    var savedStyle = new OverlayStyleOptions { BackgroundColor = Color.MediumPurple, BackgroundOpacity = 123, GradientOpacity = 77, FontSize = 13F, LineHeight = 44 };
+                    var savedStyle = new OverlayStyleOptions { BackgroundColor = Color.MediumPurple, BackgroundOpacity = 123, GradientOpacity = 77, FontSize = 13F, LineHeight = 44, HorizontalSpacing = 37 };
                     OverlayAppearanceSettings.SaveStyle(stateIdentity, savedStyle);
+                    OverlayOrderSettings.SaveDisplayMode(stateIdentity, OverlayDisplayMode.Icons);
                     var loadedStyle = OverlayAppearanceSettings.LoadStyle(stateIdentity, new OverlayStyleOptions());
                     var loadedBounds = OverlaySettings.LoadBounds(stateIdentity, Rectangle.Empty); var loadedFloating = OverlaySettings.LoadFloating(stateIdentity);
                     Assert(loadedBounds == sampleBounds && loadedFloating, $"list position and floating state persist for current display layout ({loadedBounds}, floating={loadedFloating})");
-                    Assert(loadedStyle.BackgroundColor.ToArgb() == Color.MediumPurple.ToArgb() && loadedStyle.BackgroundOpacity == 123 && loadedStyle.GradientOpacity == 77 && loadedStyle.LineHeight == 44, "list style persists for current display layout");
+                    Assert(loadedStyle.BackgroundColor.ToArgb() == Color.MediumPurple.ToArgb() && loadedStyle.BackgroundOpacity == 123 && loadedStyle.GradientOpacity == 77 && loadedStyle.LineHeight == 44 && loadedStyle.HorizontalSpacing == 37, "list style including horizontal spacing persists for current display layout");
+                    Assert(OverlayOrderSettings.LoadDisplayMode(stateIdentity) == OverlayDisplayMode.Icons, "per-list icon display mode persists for current display layout");
                 }
                 finally { Registry.CurrentUser.DeleteSubKeyTree(OverlaySettings.GetLegacySettingsKey(stateIdentity), false); }
             }
@@ -1298,19 +1280,22 @@ internal static class SmokeTests
             Assert(!placed.IntersectsWith(new Rectangle(0, 0, 500, 600)) && workArea.Contains(placed), "new lists avoid existing lists");
             var movingSurface = new Rectangle(100, 100, 300, 220);
             Rectangle[] stationarySurfaces = [new Rectangle(120, 120, 260, 180), new Rectangle(700, 120, 260, 180)];
-            var pushed = DesktopViewApplicationContext.PlanTemporaryDisplacements(movingSurface, workArea, stationarySurfaces);
-            Assert(pushed.Count == 1 && pushed.TryGetValue(0, out var pushedBounds) && !pushedBounds.IntersectsWith(movingSurface) && !pushedBounds.IntersectsWith(stationarySurfaces[1]), "manual drag temporarily pushes only the conflicting list or note");
-            Assert(DesktopViewApplicationContext.PlanTemporaryDisplacements(new Rectangle(400, 700, 200, 150), workArea, stationarySurfaces).Count == 0, "leaving the conflict area requires no displacement so original positions can be restored");
+            var pushed = DesktopViewApplicationContext.PlanReleaseDisplacements(movingSurface, workArea, stationarySurfaces);
+            Assert(pushed.Count == 1 && pushed.TryGetValue(0, out var pushedBounds) && !pushedBounds.IntersectsWith(movingSurface) && !pushedBounds.IntersectsWith(stationarySurfaces[1]), "mouse release pushes only the conflicting list or note");
+            Assert(DesktopViewApplicationContext.PlanReleaseDisplacements(new Rectangle(400, 700, 200, 150), workArea, stationarySurfaces).Count == 0, "releasing outside conflicts leaves original positions unchanged");
             Assert(AutoUpdateManager.IsNewerVersion(new Version(1, 0, 0), "v1.1.0", out var updateVersion) && updateVersion == new Version(1, 1, 0), "release version comparison");
 
             var desktopEntries = DesktopOverlayEntry.Load();
             Assert(desktopEntries.Any(entry => entry.IsVirtual && entry.Path == DesktopOverlayEntry.RecycleBinPath), "recycle bin appears in desktop list");
+            Assert(DesktopLayeredOverlayForm.CanBeginItemDrag(true, DesktopOverlayEntry.RecycleBinPath) &&
+                !DesktopLayeredOverlayForm.CanBeginItemDrag(true, "shell:unsupported"), "recycle bin alone may detach into a reference list without enabling arbitrary virtual-item moves");
             using (var recycleIcon = DesktopOverlayEntry.GetIcon(DesktopOverlayEntry.RecycleBinPath, true))
                 Assert(recycleIcon is not null, "recycle bin icon available");
+            Assert(DesktopOverlayEntry.LoadPaths([DesktopOverlayEntry.RecycleBinPath]).Single().IsVirtual, "custom list can contain the recycle bin reference");
             using (var overlayConstruction = new DesktopLayeredOverlayForm(ListItemSize.Standard))
             {
                 Assert(overlayConstruction.Width >= overlayConstruction.MinimumSize.Width, "overlay constructs before resize callbacks");
-                Assert(overlayConstruction.ContextMenuLabels.Contains("複製樣式") && overlayConstruction.ContextMenuLabels.Contains("貼上樣式"), "list menu exposes style copy and paste");
+                Assert(overlayConstruction.ContextMenuLabels.Contains("複製樣式") && overlayConstruction.ContextMenuLabels.Contains("貼上樣式") && overlayConstruction.ContextMenuLabels.Contains("變成桌面圖示樣式"), "list menu exposes style copy, paste and icon mode");
                 var detachable = overlayConstruction.EntryPaths.FirstOrDefault(value => value != DesktopOverlayEntry.RecycleBinPath);
                 if (detachable is not null) { overlayConstruction.SetExcludedPaths([detachable]); Assert(!overlayConstruction.EntryPaths.Contains(detachable, StringComparer.OrdinalIgnoreCase), "detached desktop item is hidden from main list"); overlayConstruction.SetExcludedPaths([]); }
             }
@@ -1338,6 +1323,10 @@ internal static class SmokeTests
                 var wideHeight = detachedOverlay.RequiredContentHeightForTest(wideWidth);
                 Assert(detachedOverlay.AdaptiveColumnCountForTest(wideWidth) > detachedOverlay.AdaptiveColumnCountForTest(narrowWidth) && wideHeight < narrowHeight, "detached list adds horizontal columns and lowers its required height when widened");
                 var normalMetrics = detachedOverlay.LayoutMetricsForTest;
+                var normalColumns = detachedOverlay.AdaptiveColumnCountForTest(wideWidth);
+                detachedOverlay.SetHorizontalSpacingForTest(96);
+                Assert(detachedOverlay.AdaptiveColumnCountForTest(wideWidth) < normalColumns, "horizontal item spacing immediately changes list column layout");
+                detachedOverlay.SetHorizontalSpacingForTest(16);
                 detachedOverlay.SetTextMetricsForTest(36F, 84, 12);
                 var largeMetrics = detachedOverlay.LayoutMetricsForTest;
                 Assert(largeMetrics.Width > normalMetrics.Width && largeMetrics.Height > normalMetrics.Height && detachedOverlay.RequiredContentHeightForTest(narrowWidth) > narrowHeight, "font and line scaling immediately update list cell metrics and minimum range");
@@ -1348,6 +1337,8 @@ internal static class SmokeTests
                 detachedOverlay.Show(); Application.DoEvents();
                 var blankPoint = detachedOverlay.PointToScreen(new Point(detachedOverlay.ClientSize.Width - 24, detachedOverlay.ClientSize.Height / 2));
                 Assert(detachedOverlay.OwnsScreenPointForTest(blankPoint), "detached list transparent blank area receives right-click and move input");
+                detachedOverlay.ToggleDisplayModeForTest();
+                Assert(detachedOverlay.DisplayModeForTest == OverlayDisplayMode.Icons && detachedOverlay.RequiredContentHeightForTest(wideWidth) >= detachedOverlay.MinimumSize.Height, "desktop icon mode remains inside the resizable custom-list frame");
                 detachedOverlay.Hide();
             }
             finally { Environment.SetEnvironmentVariable("DESKTOP_LIST_QA_FLOATING", previousFloatingQa); }
@@ -1369,6 +1360,7 @@ internal static class SmokeTests
                 Bold = true,
                 LineHeight = 38,
                 LineSpacing = 4,
+                HorizontalSpacing = 26,
                 CornerRadius = 18,
                 TextAlignment = OverlayTextAlignment.Center,
                 Distribution = OverlayContentDistribution.Fill
@@ -1378,11 +1370,11 @@ internal static class SmokeTests
                 var themeOption = controls.OfType<CheckBox>().Single(value => value.Text.Contains("Windows 系統顏色"));
                 Assert(themeOption.Text.Contains("Windows 系統顏色"), "system color option is visible");
                 Assert(appearance.SelectedStyle.Bold && appearance.SelectedStyle.CornerRadius == 18 &&
-                    appearance.SelectedStyle.TextAlignment == OverlayTextAlignment.Center && appearance.SelectedStyle.Distribution == OverlayContentDistribution.Fill &&
+                    appearance.SelectedStyle.TextAlignment == OverlayTextAlignment.Center && appearance.SelectedStyle.Distribution == OverlayContentDistribution.Fill && appearance.SelectedStyle.HorizontalSpacing == 26 &&
                     appearance.SelectedStyle.GradientEnabled && appearance.SelectedStyle.GradientDirection == OverlayGradientDirection.DiagonalDown && appearance.SelectedStyle.GradientMode == OverlayGradientMode.Sandwich && appearance.SelectedStyle.GradientOpacity == 140 && appearance.SelectedStyle.TextColor == Color.LightYellow,
                     "extended style values round trip");
                 Assert(appearance.AcceptButton is null, "style Enter does not confirm");
-                Assert(controls.OfType<SliderNumberControl>().Count() == 5, "all persistent numeric style values use sliders and opacity is integrated with colors");
+                Assert(controls.OfType<SliderNumberControl>().Count() == 6, "list style includes slider controls for horizontal spacing and other persistent numeric values");
                 Assert(!controls.OfType<Panel>().Any(value => value.Height == 190), "redundant style preview is removed");
                 Assert(controls.OfType<ButtonChoice<OverlayTextAlignment>>().Any() && controls.OfType<ButtonChoice<OverlayContentDistribution>>().Any() && controls.OfType<ButtonChoice<FontStyle>>().Any(), "alignment distribution and weight use buttons");
                 var fontChoices = controls.OfType<ComboBox>().Single(value => value.DrawMode == DrawMode.OwnerDrawFixed).Items.Cast<FontChoice>().ToArray();
@@ -1404,6 +1396,23 @@ internal static class SmokeTests
                     image.Save(appearanceQa);
                     appearance.Hide();
                 }
+            }
+
+            using (var noteAppearance = new OverlayStyleDialog(new OverlayStyleOptions(), "便籤"))
+            {
+                var controls = noteAppearance.Controls.Cast<Control>().SelectMany(Descendants).ToArray();
+                Assert(controls.OfType<SliderNumberControl>().Count() == 5, "note style omits the list-only horizontal-spacing slider");
+            }
+
+            Assert(InlineTextEditor.CommitsOnKey(Keys.Enter, shift: false, multiline: true) &&
+                !InlineTextEditor.CommitsOnKey(Keys.Enter, shift: true, multiline: true) &&
+                InlineTextEditor.CancelsOnKey(Keys.Escape), "inline note editing uses Enter to confirm, Shift+Enter for newline and Esc to cancel");
+            using (var inlineFont = new Font("Microsoft JhengHei UI", 10F))
+            using (var inlineEditor = new InlineTextEditor(new Rectangle(0, 0, 320, 120), "原樣式", inlineFont, Color.White, true))
+            {
+                var textInput = inlineEditor.Controls.OfType<TextBox>().Single();
+                Assert(inlineEditor.TransparencyKey == inlineEditor.BackColor && textInput.BackColor == inlineEditor.TransparencyKey && textInput.BorderStyle == BorderStyle.None,
+                    "inline note editor keeps the underlying note background visible without a system-colored border");
             }
 
             using (var colorAlpha = new ColorWithAlphaDialog(Color.Black, 64))

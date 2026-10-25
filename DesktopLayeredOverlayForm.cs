@@ -47,6 +47,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
     private int _dropInsertIndex = -1;
     private OverlaySortMode _sortMode;
     private bool _sortAscending;
+    private OverlayDisplayMode _displayMode;
     private List<LayeredEntry>? _dragOriginalOrder;
     private bool _dragCancelled;
     private bool _dropIsCopy;
@@ -85,6 +86,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
         DoubleBuffered = false;
         AllowDrop = true;
         (_sortMode, _sortAscending) = OverlayOrderSettings.LoadSort(SettingsIdentity);
+        _displayMode = OverlayOrderSettings.LoadDisplayMode(SettingsIdentity);
         _style = OverlayAppearanceSettings.LoadStyle(SettingsIdentity, DefaultStyle(itemSize));
         var qaStyleJson = Environment.GetEnvironmentVariable("DESKTOP_LIST_QA_STYLE_JSON");
         if (!string.IsNullOrWhiteSpace(qaStyleJson))
@@ -234,7 +236,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
             sourceEntries = sourceEntries.Where(entry => !_excludedPaths.Contains(entry.Path)).ToArray();
         foreach (var entry in OrderEntries(sourceEntries))
         {
-            var icon = DesktopOverlayEntry.GetIcon(entry.Path, entry.IsDirectory) ??
+            var icon = DesktopOverlayEntry.GetIcon(entry.Path, entry.IsDirectory, _displayMode == OverlayDisplayMode.Icons) ??
                        (Icon)(entry.IsDirectory ? SystemIcons.WinLogo : SystemIcons.Application).Clone();
             var info = entry.IsDirectory || entry.IsVirtual ? null : new FileInfo(entry.Path);
             _entries.Add(new LayeredEntry(entry.Name, entry.Path, entry.IsDirectory, entry.IsVirtual, icon,
@@ -258,8 +260,10 @@ internal sealed class DesktopLayeredOverlayForm : Form
             ? 120
             : _entries.Max(entry => TextRenderer.MeasureText(entry.Name, _itemFont, Size.Empty, TextFormatFlags.NoPadding).Width);
         var screenWidth = Screen.FromRectangle(Bounds).WorkingArea.Width;
-        var minimumWidth = Math.Clamp(widestText + _iconSize + 42, 220, Math.Max(220, screenWidth - 80));
-        var minimumHeight = _rowHeight + ContentPadding * 2;
+        var minimumWidth = _displayMode == OverlayDisplayMode.Icons
+            ? Math.Clamp(IconCellWidth + ContentPadding * 2, 140, Math.Max(140, screenWidth - 80))
+            : Math.Clamp(widestText + _iconSize + 42, 220, Math.Max(220, screenWidth - 80));
+        var minimumHeight = (_displayMode == OverlayDisplayMode.Icons ? IconCellHeight : _rowHeight) + ContentPadding * 2;
         MinimumSize = new Size(minimumWidth, minimumHeight);
         if (Width < minimumWidth)
             Width = minimumWidth;
@@ -284,25 +288,45 @@ internal sealed class DesktopLayeredOverlayForm : Form
     }
 
     private bool UseAdaptiveCustomLayout => _customList is not null;
+    private bool UseIconDisplay => _displayMode == OverlayDisplayMode.Icons;
     private bool UseHorizontalLayout => !UseAdaptiveCustomLayout && ClientSize.Width >= ClientSize.Height * 1.35;
 
-    private int GetCustomColumnCount(int width) => Math.Max(1, Math.Max(1, width - ContentPadding * 2) / Math.Max(1, _columnWidth));
-    private int GetCustomRowCount(int width) => Math.Max(1, (int)Math.Ceiling(_entries.Count / (double)GetCustomColumnCount(width)));
+    private int ColumnPitch => _columnWidth + _style.HorizontalSpacing;
+    private int IconDisplaySize => _itemSize switch { ListItemSize.Compact => 32, ListItemSize.Large => 64, _ => 48 };
+    private int IconCellWidth => _itemSize switch { ListItemSize.Compact => 96, ListItemSize.Large => 156, _ => 126 };
+    private int IconCellHeight => IconDisplaySize + Math.Max(34, (int)Math.Ceiling(_itemFont.GetHeight()) * 2) + 18 + _style.LineSpacing;
+    private int IconColumnPitch => IconCellWidth + _style.HorizontalSpacing;
+    private int GetIconColumnCount(int width) => Math.Max(1, Math.Max(1, width - ContentPadding * 2) / Math.Max(1, IconColumnPitch));
+    private int GetIconRowCount(int width) => Math.Max(1, (int)Math.Ceiling(_entries.Count / (double)GetIconColumnCount(width)));
+
+    private int GetCustomColumnCount(int width) => UseIconDisplay ? GetIconColumnCount(width) : Math.Max(1, Math.Max(1, width - ContentPadding * 2) / Math.Max(1, ColumnPitch));
+    private int GetCustomRowCount(int width) => UseIconDisplay ? GetIconRowCount(width) : Math.Max(1, (int)Math.Ceiling(_entries.Count / (double)GetCustomColumnCount(width)));
     private int GetRequiredCustomHeight(int width)
     {
-        var minimum = _rowHeight + ContentPadding * 2;
-        var desired = GetCustomRowCount(width) * LayoutRowHeight + ContentPadding * 2;
+        var step = UseIconDisplay ? IconCellHeight : LayoutRowHeight;
+        var minimum = step + ContentPadding * 2;
+        var desired = GetCustomRowCount(width) * step + ContentPadding * 2;
         return Math.Clamp(desired, minimum, Math.Max(minimum, Screen.FromRectangle(Bounds).WorkingArea.Height - 80));
     }
 
     internal int AdaptiveColumnCountForTest(int width) => GetCustomColumnCount(width);
     internal int RequiredContentHeightForTest(int width) => GetRequiredCustomHeight(width);
     internal Size LayoutMetricsForTest => new(_columnWidth, _rowHeight);
+    internal OverlayDisplayMode DisplayModeForTest => _displayMode;
     internal void SetTextMetricsForTest(float fontSize, int lineHeight, int lineSpacing)
     {
         var style = _style.Clone();
         style.FontSize = fontSize; style.LineHeight = lineHeight; style.LineSpacing = lineSpacing;
         ApplyStyle(style, save: false);
+    }
+    internal void SetHorizontalSpacingForTest(int spacing)
+    {
+        var style = _style.Clone(); style.HorizontalSpacing = spacing; ApplyStyle(style, save: false);
+    }
+    internal void ToggleDisplayModeForTest()
+    {
+        _displayMode = _displayMode == OverlayDisplayMode.List ? OverlayDisplayMode.Icons : OverlayDisplayMode.List;
+        _scrollOffset = 0; ReloadItems();
     }
 
     private int RowsPerColumn => Math.Max(1, (ClientSize.Height - ContentPadding * 2) / Math.Max(1, _rowHeight));
@@ -367,8 +391,10 @@ internal sealed class DesktopLayeredOverlayForm : Form
 
     private void HandleMouseWheel(object? sender, MouseEventArgs e)
     {
-        if (UseHorizontalLayout)
-            _scrollOffset -= Math.Sign(e.Delta) * _columnWidth;
+        if (UseIconDisplay)
+            _scrollOffset -= Math.Sign(e.Delta) * IconCellHeight * 2;
+        else if (UseHorizontalLayout)
+            _scrollOffset -= Math.Sign(e.Delta) * ColumnPitch;
         else
             _scrollOffset -= Math.Sign(e.Delta) * _rowHeight * 3;
         ClampScroll();
@@ -418,19 +444,29 @@ internal sealed class DesktopLayeredOverlayForm : Form
             point.Y < ContentPadding || point.Y >= ClientSize.Height - ContentPadding)
             return -1;
         int index;
-        if (UseAdaptiveCustomLayout)
+        if (UseIconDisplay)
         {
             var contentX = point.X - ContentPadding;
             var contentY = point.Y - ContentPadding + _scrollOffset;
-            var column = contentX / Math.Max(1, _columnWidth);
-            if (column >= GetCustomColumnCount(ClientSize.Width)) return -1;
+            var column = contentX / Math.Max(1, IconColumnPitch);
+            if (column >= GetIconColumnCount(ClientSize.Width) || contentX % Math.Max(1, IconColumnPitch) >= IconCellWidth) return -1;
+            var row = contentY / Math.Max(1, IconCellHeight);
+            index = row * GetIconColumnCount(ClientSize.Width) + column;
+        }
+        else if (UseAdaptiveCustomLayout)
+        {
+            var contentX = point.X - ContentPadding;
+            var contentY = point.Y - ContentPadding + _scrollOffset;
+            var column = contentX / Math.Max(1, ColumnPitch);
+            if (column >= GetCustomColumnCount(ClientSize.Width) || contentX % Math.Max(1, ColumnPitch) >= _columnWidth) return -1;
             var row = contentY / Math.Max(1, LayoutRowHeight);
             index = row * GetCustomColumnCount(ClientSize.Width) + column;
         }
         else if (UseHorizontalLayout)
         {
             var contentX = point.X - ContentPadding + _scrollOffset;
-            var column = contentX / Math.Max(1, _columnWidth);
+            var column = contentX / Math.Max(1, ColumnPitch);
+            if (contentX % Math.Max(1, ColumnPitch) >= _columnWidth) return -1;
             var row = (point.Y - ContentPadding) / Math.Max(1, LayoutRowHeight);
             index = column * RowsPerColumn + row;
         }
@@ -445,7 +481,12 @@ internal sealed class DesktopLayeredOverlayForm : Form
     private void ClampScroll()
     {
         int maximum;
-        if (UseAdaptiveCustomLayout)
+        if (UseIconDisplay)
+        {
+            var viewportHeight = Math.Max(0, ClientSize.Height - ContentPadding * 2);
+            maximum = Math.Max(0, GetIconRowCount(ClientSize.Width) * IconCellHeight - viewportHeight);
+        }
+        else if (UseAdaptiveCustomLayout)
         {
             var viewportHeight = Math.Max(0, ClientSize.Height - ContentPadding * 2);
             maximum = Math.Max(0, GetCustomRowCount(ClientSize.Width) * LayoutRowHeight - viewportHeight);
@@ -454,7 +495,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
         {
             var columns = (int)Math.Ceiling(_entries.Count / (double)RowsPerColumn);
             var viewportWidth = Math.Max(0, ClientSize.Width - ContentPadding * 2);
-            maximum = Math.Max(0, columns * _columnWidth - viewportWidth);
+            maximum = Math.Max(0, columns * ColumnPitch - viewportWidth);
         }
         else
         {
@@ -502,7 +543,9 @@ internal sealed class DesktopLayeredOverlayForm : Form
             else
                 graphics.FillRectangle(hitTargetBrush, ClientRectangle);
 
-            if (UseAdaptiveCustomLayout)
+            if (UseIconDisplay)
+                DrawIconEntries(graphics);
+            else if (UseAdaptiveCustomLayout)
                 DrawAdaptiveCustomEntries(graphics);
             else if (UseHorizontalLayout)
                 DrawHorizontalEntries(graphics);
@@ -560,7 +603,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
         {
             var column = index / rows;
             var row = index % rows;
-            var x = ContentPadding + column * _columnWidth - _scrollOffset;
+            var x = ContentPadding + column * ColumnPitch - _scrollOffset;
             if (x + _columnWidth < ContentPadding || x >= ClientSize.Width - ContentPadding)
                 continue;
             var y = ContentPadding + row * LayoutRowHeight;
@@ -577,8 +620,39 @@ internal sealed class DesktopLayeredOverlayForm : Form
             var column = index % columns;
             var y = ContentPadding + row * LayoutRowHeight - _scrollOffset;
             if (y + LayoutRowHeight < ContentPadding || y >= ClientSize.Height - ContentPadding) continue;
-            var x = ContentPadding + column * _columnWidth;
+            var x = ContentPadding + column * ColumnPitch;
             DrawEntry(graphics, _entries[index], index, new Rectangle(x, y, _columnWidth, LayoutRowHeight));
+        }
+    }
+
+    private void DrawIconEntries(Graphics graphics)
+    {
+        var columns = GetIconColumnCount(ClientSize.Width);
+        using var shadowBrush = new SolidBrush(Color.FromArgb(210, 0, 0, 0));
+        using var textBrush = new SolidBrush(_style.TextColor);
+        using var format = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Near, Trimming = StringTrimming.EllipsisCharacter };
+        for (var index = 0; index < _entries.Count; index++)
+        {
+            var row = index / columns; var column = index % columns;
+            var bounds = new Rectangle(ContentPadding + column * IconColumnPitch,
+                ContentPadding + row * IconCellHeight - _scrollOffset, IconCellWidth, IconCellHeight);
+            if (bounds.Bottom < ContentPadding || bounds.Top >= ClientSize.Height - ContentPadding) continue;
+            if (index == _hoveredIndex || index == _selectedIndex)
+            {
+                using var selection = new SolidBrush(index == _selectedIndex ? Color.FromArgb(135, 37, 99, 235) : Color.FromArgb(80, 71, 85, 105));
+                graphics.FillRoundedRectangle(selection, bounds, 8);
+            }
+            var iconBounds = new Rectangle(bounds.Left + (bounds.Width - IconDisplaySize) / 2, bounds.Top + 6, IconDisplaySize, IconDisplaySize);
+            graphics.DrawIcon(_entries[index].Icon, iconBounds);
+            var textBounds = new RectangleF(bounds.Left + 3, iconBounds.Bottom + 5, bounds.Width - 6, bounds.Bottom - iconBounds.Bottom - 7);
+            var shadowBounds = textBounds; shadowBounds.Offset(1, 1);
+            graphics.DrawString(_entries[index].Name, _itemFont, shadowBrush, shadowBounds, format);
+            graphics.DrawString(_entries[index].Name, _itemFont, textBrush, textBounds, format);
+            if (index == _dropFolderIndex)
+            {
+                using var targetPen = new Pen(Color.FromArgb(245, 96, 165, 250), 2F);
+                graphics.DrawRectangle(targetPen, Rectangle.Inflate(bounds, -1, -1));
+            }
         }
     }
 
@@ -673,6 +747,9 @@ internal sealed class DesktopLayeredOverlayForm : Form
         menu.Items.Add("緊湊項目", null, (_, _) => SetItemSize(ListItemSize.Compact));
         menu.Items.Add("標準項目", null, (_, _) => SetItemSize(ListItemSize.Standard));
         menu.Items.Add("大型項目", null, (_, _) => SetItemSize(ListItemSize.Large));
+        var displayModeItem = new ToolStripMenuItem(_displayMode == OverlayDisplayMode.List ? "變成桌面圖示樣式" : "變回清單樣式");
+        displayModeItem.Click += (_, _) => ToggleDisplayMode();
+        menu.Items.Add(displayModeItem);
         var sortMenu = new ToolStripMenuItem("排序方式");
         sortMenu.DropDownItems.Add("自訂順序", null, (_, _) => SetSortMode(OverlaySortMode.Custom));
         sortMenu.DropDownItems.Add("名稱", null, (_, _) => SetSortMode(OverlaySortMode.Name));
@@ -702,10 +779,22 @@ internal sealed class DesktopLayeredOverlayForm : Form
         };
         menu.Items.Add(autoUpdate);
         menu.Items.Add("立即檢查更新", null, (_, _) => CheckUpdateRequested?.Invoke(this, EventArgs.Empty));
-        menu.Opening += (_, _) => { autoUpdate.Checked = AutoUpdateManager.IsEnabled; pasteStyle.Enabled = OverlayStyleClipboard.HasStyle; };
+        menu.Opening += (_, _) =>
+        {
+            autoUpdate.Checked = AutoUpdateManager.IsEnabled; pasteStyle.Enabled = OverlayStyleClipboard.HasStyle;
+            displayModeItem.Text = _displayMode == OverlayDisplayMode.List ? "變成桌面圖示樣式" : "變回清單樣式";
+        };
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("重新整理", null, (_, _) => ReloadItems());
         return menu;
+    }
+
+    private void ToggleDisplayMode()
+    {
+        _displayMode = _displayMode == OverlayDisplayMode.List ? OverlayDisplayMode.Icons : OverlayDisplayMode.List;
+        _scrollOffset = 0;
+        OverlayOrderSettings.SaveDisplayMode(SettingsIdentity, _displayMode);
+        ReloadItems();
     }
 
     private void EditStyle()
@@ -851,7 +940,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
 
     private void CopySelectedToClipboard()
     {
-        if (SelectedEntry is not { } entry)
+        if (SelectedEntry is not { } entry || entry.IsVirtual)
             return;
         var files = new StringCollection { entry.Path };
         Clipboard.SetFileDropList(files);
@@ -865,7 +954,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
         _dragCancelled = false;
         _dragOriginalOrder = _entries.ToList();
         var data = new DataObject();
-        if (_entries[index].IsVirtual)
+        if (!CanBeginItemDrag(_entries[index].IsVirtual, _entries[index].Path))
             return;
         data.SetData("DesktopListTool.SourcePath", _entries[index].Path);
         var effect = DoDragDrop(data, DragDropEffects.Move | DragDropEffects.Copy);
@@ -908,6 +997,9 @@ internal sealed class DesktopLayeredOverlayForm : Form
     internal static bool ShouldShowDesktopDropCursor(DragDropEffects effect, bool insideSource, bool overDesktop) =>
         effect == DragDropEffects.None && !insideSource && overDesktop;
 
+    internal static bool CanBeginItemDrag(bool isVirtual, string path) =>
+        !isVirtual || string.Equals(path, DesktopOverlayEntry.RecycleBinPath, StringComparison.OrdinalIgnoreCase);
+
     private void HandleDragEnter(object? sender, DragEventArgs e) => UpdateDragTarget(e);
 
     private void HandleDragOver(object? sender, DragEventArgs e) => UpdateDragTarget(e);
@@ -923,8 +1015,9 @@ internal sealed class DesktopLayeredOverlayForm : Form
         _lastDragClientPoint = client;
         var index = GetEntryIndexAt(client);
         var sourcePath = e.Data.GetData("DesktopListTool.SourcePath") as string;
+        var sourceIsVirtual = string.Equals(sourcePath, DesktopOverlayEntry.RecycleBinPath, StringComparison.OrdinalIgnoreCase);
         _dropTargetPath = null; _dropIsArchive = false; _dropFolderIndex = -1;
-        if (index >= 0 && !_entries[index].IsVirtual && !string.Equals(sourcePath, _entries[index].Path, StringComparison.OrdinalIgnoreCase) && IsFolderDropZone(client, index))
+        if (!sourceIsVirtual && index >= 0 && !_entries[index].IsVirtual && !string.Equals(sourcePath, _entries[index].Path, StringComparison.OrdinalIgnoreCase) && IsFolderDropZone(client, index))
         {
             var candidate = _entries[index];
             if (candidate.IsDirectory) _dropTargetPath = candidate.Path;
@@ -934,6 +1027,12 @@ internal sealed class DesktopLayeredOverlayForm : Form
         }
         _dropInsertIndex = _dropFolderIndex >= 0 ? -1 : GetInsertionIndex(client);
         _dropIsCopy = (e.KeyState & 8) != 0;
+        if (sourceIsVirtual && _customList is null && !_entries.Any(value => string.Equals(value.Path, sourcePath, StringComparison.OrdinalIgnoreCase)))
+        {
+            e.Effect = DragDropEffects.None;
+            RenderLayer();
+            return;
+        }
         e.Effect = _dropIsArchive || _dropIsCopy ? DragDropEffects.Copy : DragDropEffects.Move;
         RenderLayer();
     }
@@ -953,7 +1052,9 @@ internal sealed class DesktopLayeredOverlayForm : Form
         if (index < 0)
             return _entries.Count;
         var bounds = GetEntryBounds(index);
-        return UseAdaptiveCustomLayout
+        return UseIconDisplay
+            ? (point.X < bounds.Left + bounds.Width / 2 ? index : index + 1)
+            : UseAdaptiveCustomLayout
             ? (point.X < bounds.Left + bounds.Width / 2 ? index : index + 1)
             : UseHorizontalLayout
             ? (point.Y < bounds.Top + bounds.Height / 2 ? index : index + 1)
@@ -962,19 +1063,26 @@ internal sealed class DesktopLayeredOverlayForm : Form
 
     private Rectangle GetEntryBounds(int index)
     {
+        if (UseIconDisplay)
+        {
+            var columns = GetIconColumnCount(ClientSize.Width);
+            var row = index / columns; var column = index % columns;
+            return new Rectangle(ContentPadding + column * IconColumnPitch,
+                ContentPadding + row * IconCellHeight - _scrollOffset, IconCellWidth, IconCellHeight);
+        }
         if (UseAdaptiveCustomLayout)
         {
             var columns = GetCustomColumnCount(ClientSize.Width);
             var row = index / columns;
             var column = index % columns;
-            return new Rectangle(ContentPadding + column * _columnWidth,
+            return new Rectangle(ContentPadding + column * ColumnPitch,
                 ContentPadding + row * LayoutRowHeight - _scrollOffset, _columnWidth, LayoutRowHeight);
         }
         if (UseHorizontalLayout)
         {
             var column = index / RowsPerColumn;
             var row = index % RowsPerColumn;
-            return new Rectangle(ContentPadding + column * _columnWidth - _scrollOffset,
+            return new Rectangle(ContentPadding + column * ColumnPitch - _scrollOffset,
                 ContentPadding + row * LayoutRowHeight, _columnWidth, LayoutRowHeight);
         }
         return new Rectangle(ContentPadding, ContentPadding + index * LayoutRowHeight - _scrollOffset,

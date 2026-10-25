@@ -32,6 +32,7 @@ internal sealed class OverlayStyleOptions
     public bool Bold { get; set; }
     public int LineHeight { get; set; } = 36;
     public int LineSpacing { get; set; }
+    public int HorizontalSpacing { get; set; } = 16;
     public int CornerRadius { get; set; }
     public OverlayTextAlignment TextAlignment { get; set; }
     public OverlayContentDistribution Distribution { get; set; }
@@ -178,6 +179,7 @@ internal sealed class OverlayStyleDialog : Form
     private readonly SliderNumberControl _fontSize;
     private readonly SliderNumberControl _lineHeight;
     private readonly SliderNumberControl _lineSpacing;
+    private readonly SliderNumberControl _horizontalSpacing;
     private readonly SliderNumberControl _radius;
     private readonly ButtonChoice<OverlayTextAlignment> _alignment = new((OverlayTextAlignment.Left, "☰←", "靠左"), (OverlayTextAlignment.Center, "☰↔", "置中"), (OverlayTextAlignment.Right, "☰→", "靠右"));
     private readonly ButtonChoice<OverlayContentDistribution> _distribution = new((OverlayContentDistribution.Packed, "⇥ 集中", "左右集中排列"), (OverlayContentDistribution.Fill, "↔ 分散", "左右平均分散填滿"));
@@ -194,6 +196,7 @@ internal sealed class OverlayStyleDialog : Form
         _fontSize = new SliderNumberControl(6, 48, (decimal)style.FontSize, .5M, 1, 10M);
         _lineHeight = new SliderNumberControl(16, 160, style.LineHeight);
         _lineSpacing = new SliderNumberControl(0, 48, style.LineSpacing);
+        _horizontalSpacing = new SliderNumberControl(0, 120, style.HorizontalSpacing);
         _radius = new SliderNumberControl(0, 80, style.CornerRadius);
         _selectedColor = style.BackgroundColor;
         _selectedGradientColor = style.GradientColor;
@@ -214,9 +217,10 @@ internal sealed class OverlayStyleDialog : Form
         _weight.Value = style.Bold ? FontStyle.Bold : FontStyle.Regular; _alignment.Value = style.TextAlignment; _distribution.Value = style.Distribution; _gradientDirection.Value = style.GradientDirection; _gradientMode.Value = style.GradientMode;
         UpdateWeightButtons();
 
-        var table = new TableLayoutPanel { Dock = DockStyle.Fill, AutoScroll = true, Padding = new Padding(22), ColumnCount = 2, RowCount = 18 };
+        var isListStyle = targetName.Contains("清單", StringComparison.Ordinal);
+        var table = new TableLayoutPanel { Dock = DockStyle.Fill, AutoScroll = true, Padding = new Padding(22), ColumnCount = 2, RowCount = isListStyle ? 19 : 18 };
         table.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 210)); table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-        for (var i = 0; i < 18; i++) table.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        for (var i = 0; i < table.RowCount; i++) table.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         AddRow(table, 0, "背景顏色與透明度", _color); AddRow(table, 1, "系統顏色", _systemColor);
         AddRow(table, 2, "漸層", _gradient); AddRow(table, 3, "第二顏色與透明度", _gradientColor);
         var gradientActions = new FlowLayoutPanel { AutoSize = true, WrapContents = false };
@@ -229,8 +233,11 @@ internal sealed class OverlayStyleDialog : Form
         var resetFont = new Button { Text = "預設", AutoSize = true, Margin = new Padding(0, 0, 8, 0) }; resetFont.Click += (_, _) => _family.SelectedItem = _family.Items.Cast<FontChoice>().FirstOrDefault(value => value.Name == "Microsoft JhengHei UI");
         fontPanel.Controls.Add(resetFont, 0, 0); fontPanel.Controls.Add(_family, 1, 0); AddRow(table, 8, "字型", fontPanel);
         AddRow(table, 9, "字體顏色", _textColor); AddRow(table, 10, "字體大小", _fontSize); AddRow(table, 11, "字體粗細", _weight); AddRow(table, 12, "行高", _lineHeight);
-        AddRow(table, 13, "行距／項目間距", _lineSpacing); AddRow(table, 14, "圓角大小（0 為直角）", _radius);
-        AddRow(table, 15, "文字對齊", _alignment); AddRow(table, 16, "內容排列（左右）", _distribution);
+        AddRow(table, 13, "行距／上下項目間距", _lineSpacing);
+        var styleRow = 14;
+        if (isListStyle) { AddRow(table, styleRow, "左右項目間距", _horizontalSpacing); styleRow++; }
+        AddRow(table, styleRow++, "圓角大小（0 為直角）", _radius);
+        AddRow(table, styleRow++, "文字對齊", _alignment); AddRow(table, styleRow, "內容排列（左右）", _distribution);
 
         var buttons = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 62, FlowDirection = FlowDirection.RightToLeft, Padding = new Padding(10) };
         var cancel = new Button { Text = "取消", DialogResult = DialogResult.Cancel, Size = new Size(100, 38) };
@@ -238,7 +245,7 @@ internal sealed class OverlayStyleDialog : Form
         buttons.Controls.AddRange([cancel, ok]); Controls.Add(table); Controls.Add(buttons); CancelButton = cancel;
         _color.Click += (_, _) => ChooseColorWithAlpha(true); _gradientColor.Click += (_, _) => ChooseColorWithAlpha(false); _textColor.Click += (_, _) => ChooseColor(ref _selectedTextColor, _textColor);
         _systemColor.CheckedChanged += (_, _) => UpdatePreview(); _gradient.CheckedChanged += (_, _) => UpdatePreview();
-        foreach (var slider in new[] { _gradientTransition, _fontSize, _lineHeight, _lineSpacing, _radius }) slider.ValueChanged += (_, _) => UpdatePreview();
+        foreach (var slider in new[] { _gradientTransition, _fontSize, _lineHeight, _lineSpacing, _horizontalSpacing, _radius }) slider.ValueChanged += (_, _) => UpdatePreview();
         _family.SelectedIndexChanged += (_, _) => { UpdateWeightButtons(); UpdatePreview(); };
         _weight.ValueChanged += (_, _) => UpdatePreview(); _alignment.ValueChanged += (_, _) => UpdatePreview();
         _distribution.ValueChanged += (_, _) => UpdatePreview(); _gradientDirection.ValueChanged += (_, _) => UpdatePreview(); _gradientMode.ValueChanged += (_, _) => UpdatePreview();
@@ -251,7 +258,7 @@ internal sealed class OverlayStyleDialog : Form
         BackgroundOpacity = _selectedOpacity, FollowThemeColor = _systemColor.Checked,
         GradientEnabled = _gradient.Checked, GradientColor = _selectedGradientColor, GradientOpacity = _selectedGradientOpacity, GradientTransition = (int)_gradientTransition.Value, GradientDirection = _gradientDirection.Value, GradientMode = _gradientMode.Value,
         TextColor = _selectedTextColor, FontFamily = (_family.SelectedItem as FontChoice)?.Name ?? "Microsoft JhengHei UI", FontSize = (float)_fontSize.Value, Bold = _weight.Value == FontStyle.Bold,
-        LineHeight = (int)_lineHeight.Value, LineSpacing = (int)_lineSpacing.Value, CornerRadius = (int)_radius.Value,
+        LineHeight = (int)_lineHeight.Value, LineSpacing = (int)_lineSpacing.Value, HorizontalSpacing = (int)_horizontalSpacing.Value, CornerRadius = (int)_radius.Value,
         TextAlignment = _alignment.Value, Distribution = _distribution.Value
     };
 
@@ -444,6 +451,7 @@ internal static class OverlayAppearanceSettings
             if (key.GetValue("FontBold") is int bold) result.Bold = bold != 0;
             if (key.GetValue("LineHeight") is int height) result.LineHeight = Math.Clamp(height, 16, 160);
             if (key.GetValue("LineSpacing") is int spacing) result.LineSpacing = Math.Clamp(spacing, 0, 48);
+            if (key.GetValue("HorizontalSpacing") is int horizontalSpacing) result.HorizontalSpacing = Math.Clamp(horizontalSpacing, 0, 120);
             if (key.GetValue("CornerRadius") is int radius) result.CornerRadius = Math.Clamp(radius, 0, 80);
             if (key.GetValue("TextAlignment") is int alignment && Enum.IsDefined(typeof(OverlayTextAlignment), alignment)) result.TextAlignment = (OverlayTextAlignment)alignment;
             if (key.GetValue("Distribution") is int distribution && Enum.IsDefined(typeof(OverlayContentDistribution), distribution)) result.Distribution = (OverlayContentDistribution)distribution;
@@ -465,7 +473,7 @@ internal static class OverlayAppearanceSettings
             key.SetValue("TextColor", (text.R << 16) | (text.G << 8) | text.B, RegistryValueKind.DWord);
             key.SetValue("FontFamily", style.FontFamily, RegistryValueKind.String); key.SetValue("FontSizeX10", (int)Math.Round(style.FontSize * 10), RegistryValueKind.DWord);
             key.SetValue("FontBold", style.Bold ? 1 : 0, RegistryValueKind.DWord); key.SetValue("LineHeight", style.LineHeight, RegistryValueKind.DWord);
-            key.SetValue("LineSpacing", style.LineSpacing, RegistryValueKind.DWord); key.SetValue("CornerRadius", style.CornerRadius, RegistryValueKind.DWord);
+            key.SetValue("LineSpacing", style.LineSpacing, RegistryValueKind.DWord); key.SetValue("HorizontalSpacing", style.HorizontalSpacing, RegistryValueKind.DWord); key.SetValue("CornerRadius", style.CornerRadius, RegistryValueKind.DWord);
             key.SetValue("TextAlignment", (int)style.TextAlignment, RegistryValueKind.DWord); key.SetValue("Distribution", (int)style.Distribution, RegistryValueKind.DWord);
         }
         catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException) { }

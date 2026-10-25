@@ -468,13 +468,13 @@ internal sealed record DesktopOverlayEntry(string Name, string Path, bool IsDire
         return result;
     }
 
-    public static Icon? GetIcon(string path, bool isDirectory)
+    public static Icon? GetIcon(string path, bool isDirectory, bool large = false)
     {
         if (string.Equals(path, RecycleBinPath, StringComparison.OrdinalIgnoreCase))
-            return GetRecycleBinIcon();
+            return GetRecycleBinIcon(large);
         const uint shgfiIcon = 0x000000100;
         const uint shgfiSmallIcon = 0x000000001;
-        var result = SHGetFileInfo(path, isDirectory ? 0x10u : 0x80u, out var info, (uint)Marshal.SizeOf<ShellFileInfo>(), shgfiIcon | shgfiSmallIcon);
+        var result = SHGetFileInfo(path, isDirectory ? 0x10u : 0x80u, out var info, (uint)Marshal.SizeOf<ShellFileInfo>(), shgfiIcon | (large ? 0u : shgfiSmallIcon));
         if (result == IntPtr.Zero || info.IconHandle == IntPtr.Zero)
             return null;
         try
@@ -487,12 +487,12 @@ internal sealed record DesktopOverlayEntry(string Name, string Path, bool IsDire
         }
     }
 
-    private static Icon? GetRecycleBinIcon()
+    private static Icon? GetRecycleBinIcon(bool large)
     {
         const uint shgsiIcon = 0x000000100;
         const uint shgsiSmallIcon = 0x000000001;
         var info = new StockIconInfo { Size = (uint)Marshal.SizeOf<StockIconInfo>() };
-        if (SHGetStockIconInfo(32, shgsiIcon | shgsiSmallIcon, ref info) != 0 || info.IconHandle == IntPtr.Zero)
+        if (SHGetStockIconInfo(32, shgsiIcon | (large ? 0u : shgsiSmallIcon), ref info) != 0 || info.IconHandle == IntPtr.Zero)
             return null;
         try { return (Icon)Icon.FromHandle(info.IconHandle).Clone(); }
         finally { DestroyIcon(info.IconHandle); }

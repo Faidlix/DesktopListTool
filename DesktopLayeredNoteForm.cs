@@ -24,6 +24,9 @@ internal sealed class DesktopLayeredNoteForm : Form
     private Rectangle _addChecklistBounds;
     private DesktopChecklistItem? _pendingCheckItem;
     private InlineTextEditor? _inlineEditor;
+    private bool _editingBody;
+    private Guid? _editingChecklistItemId;
+    private Rectangle _bodyTextBounds;
     private bool _frameVisible;
     private OverlayResizeCorner _resizeHoverCorner;
     private Color _backgroundColor;
@@ -286,12 +289,19 @@ internal sealed class DesktopLayeredNoteForm : Form
         var y = safe.Top - _scrollOffset;
         var itemStep = Math.Max(_style.LineHeight, (int)Math.Ceiling(_font.GetHeight(graphics)) + 6) + _style.LineSpacing;
         _lastDistributionExtra = 0;
-        if (!string.IsNullOrWhiteSpace(_data.Text))
+        var bodyTop = y;
+        if (!string.IsNullOrWhiteSpace(_data.Text) && !_editingBody)
         {
             using var textBrush = new SolidBrush(_style.TextColor);
             using var shadowBrush = new SolidBrush(Color.FromArgb(210, 0, 0, 0));
             y = DrawMarkdownText(graphics, _data.Text, safe.Left, y, width, shadowBrush, textBrush) + 10;
         }
+        else if (!string.IsNullOrWhiteSpace(_data.Text))
+        {
+            var measured = MeasureMarkdownLayout(graphics, _data.Text, width);
+            y += measured.Height + 10;
+        }
+        _bodyTextBounds = Rectangle.FromLTRB(safe.Left, bodyTop, safe.Right, Math.Min(safe.Bottom, Math.Max(bodyTop + Math.Max(itemStep, 32), y)));
         var ordered = _data.Items.OrderBy(value => value.Completed).ToList();
         if (ordered.Count == 0)
         {
@@ -318,7 +328,8 @@ internal sealed class DesktopLayeredNoteForm : Form
             using var textBrush = new SolidBrush(_style.TextColor);
             using var shadowBrush = new SolidBrush(Color.FromArgb(210, 0, 0, 0));
             var itemBounds = new RectangleF(box.Right + 8, row.Y + Math.Max(0, (row.Height - font.Height) / 2F), Math.Max(1, row.Right - box.Right - 10), row.Height);
-            DrawSimpleText(graphics, item.Text, font, itemBounds, shadowBrush, textBrush);
+            if (_editingChecklistItemId != item.Id)
+                DrawSimpleText(graphics, item.Text, font, itemBounds, shadowBrush, textBrush);
             _checkBounds.Add((item, row));
             _checkTextBounds[item.Id] = Rectangle.Ceiling(itemBounds);
             y += itemStep;
@@ -490,26 +501,38 @@ internal sealed class DesktopLayeredNoteForm : Form
     private void BeginInlineBodyEdit()
     {
         CloseInlineEditor();
-        var safe = SafeContentBounds; var screen = RectangleToScreen(safe);
-        _inlineEditor = new InlineTextEditor(screen, _data.Text, _font, _style.TextColor, EditorBackgroundColor(), true);
-        _inlineEditor.Committed += value => { _data.Text = value.TrimEnd(); _scrollOffset = 0; _inlineEditor = null; RenderLayer(); NoteChanged?.Invoke(this, EventArgs.Empty); };
-        _inlineEditor.Canceled += () => _inlineEditor = null;
-        _inlineEditor.Show(this);
+        _editingBody = true; _editingChecklistItemId = null; RenderLayer();
+        var local = Rectangle.Intersect(_bodyTextBounds, SafeContentBounds);
+        if (local.Width <= 0 || local.Height <= 0) local = SafeContentBounds;
+        var editor = new InlineTextEditor(RectangleToScreen(local), _data.Text, _font, _style.TextColor, true);
+        _inlineEditor = editor;
+        editor.Committed += value => { if (!ReferenceEquals(_inlineEditor, editor)) return; _data.Text = value.TrimEnd(); _scrollOffset = 0; FinishInlineEdit(editor); NoteChanged?.Invoke(this, EventArgs.Empty); };
+        editor.Canceled += () => { if (ReferenceEquals(_inlineEditor, editor)) FinishInlineEdit(editor); };
+        editor.Show(this);
     }
 
     private void BeginInlineChecklistEdit(DesktopChecklistItem item, bool removeOnCancel)
     {
-        CloseInlineEditor(); RenderLayer();
+        CloseInlineEditor(); _editingBody = false; _editingChecklistItemId = item.Id; RenderLayer();
         if (!_checkTextBounds.TryGetValue(item.Id, out var local)) local = new Rectangle(SafeContentBounds.Left + 30, SafeContentBounds.Top, Math.Max(80, SafeContentBounds.Width - 30), Math.Max(28, _style.LineHeight));
         var screen = RectangleToScreen(local);
-        _inlineEditor = new InlineTextEditor(screen, item.Text, _font, _style.TextColor, EditorBackgroundColor(), false);
-        _inlineEditor.Committed += value => { item.Text = value.Trim(); if (item.Text.Length == 0) _data.Items.Remove(item); _data.Items = _data.Items.OrderBy(value => value.Completed).ToList(); _inlineEditor = null; RenderLayer(); NoteChanged?.Invoke(this, EventArgs.Empty); };
-        _inlineEditor.Canceled += () => { if (removeOnCancel) _data.Items.Remove(item); _inlineEditor = null; RenderLayer(); if (removeOnCancel) NoteChanged?.Invoke(this, EventArgs.Empty); };
-        _inlineEditor.Show(this);
+        var editor = new InlineTextEditor(screen, item.Text, _font, _style.TextColor, false);
+        _inlineEditor = editor;
+        editor.Committed += value => { if (!ReferenceEquals(_inlineEditor, editor)) return; item.Text = value.Trim(); if (item.Text.Length == 0) _data.Items.Remove(item); _data.Items = _data.Items.OrderBy(value => value.Completed).ToList(); FinishInlineEdit(editor); NoteChanged?.Invoke(this, EventArgs.Empty); };
+        editor.Canceled += () => { if (!ReferenceEquals(_inlineEditor, editor)) return; if (removeOnCancel) _data.Items.Remove(item); FinishInlineEdit(editor); if (removeOnCancel) NoteChanged?.Invoke(this, EventArgs.Empty); };
+        editor.Show(this);
     }
 
-    private Color EditorBackgroundColor() => Color.FromArgb(255, _backgroundColor.R, _backgroundColor.G, _backgroundColor.B);
-    private void CloseInlineEditor() { if (_inlineEditor is { IsDisposed: false } editor) editor.Close(); _inlineEditor = null; }
+    private void FinishInlineEdit(InlineTextEditor editor)
+    {
+        if (ReferenceEquals(_inlineEditor, editor)) _inlineEditor = null;
+        _editingBody = false; _editingChecklistItemId = null; RenderLayer();
+    }
+    private void CloseInlineEditor()
+    {
+        if (_inlineEditor is { IsDisposed: false } editor) editor.Close();
+        _inlineEditor = null; _editingBody = false; _editingChecklistItemId = null;
+    }
     private bool IsResizeCorner(Point point) => (point.X < 18 || point.X >= ClientSize.Width - 18) && (point.Y < 18 || point.Y >= ClientSize.Height - 18);
 
     private void EditStyle()
