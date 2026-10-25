@@ -1,6 +1,6 @@
 // 功能：編輯清單或便籤的背景、字型、間距、圓角、對齊與內容分布樣式。
 // 使用：從清單或便籤右鍵選「樣式…」；滑桿與右側數字框會即時預覽，只有按「確定」才保存。
-// 設定：各清單與每張便籤獨立保存；Enter 只套用目前輸入值，不會關閉視窗。
+// 設定：顏色與透明度也即時套用；各清單與每張便籤依顯示器配置獨立保存，Enter 不會關閉樣式視窗。
 
 using System.Drawing.Drawing2D;
 using System.ComponentModel;
@@ -137,6 +137,7 @@ internal sealed class ColorWithAlphaDialog : Form
     private readonly SliderNumberControl _alpha;
     public Color SelectedColor => _color;
     public byte SelectedAlpha => (byte)Math.Round(_alpha.Value / 100M * 255M);
+    public event EventHandler? PreviewChanged;
 
     public ColorWithAlphaDialog(Color color, byte alpha, bool colorEnabled = true)
     {
@@ -152,10 +153,13 @@ internal sealed class ColorWithAlphaDialog : Form
         var cancel = new Button { Text = "取消", DialogResult = DialogResult.Cancel, AutoSize = true }; var ok = new Button { Text = "確定", DialogResult = DialogResult.OK, AutoSize = true };
         buttons.Controls.Add(cancel); buttons.Controls.Add(ok); table.Controls.Add(buttons, 0, 2); table.SetColumnSpan(buttons, 2); Controls.Add(table); AcceptButton = ok; CancelButton = cancel;
         _colorButton.Click += (_, _) => { using var picker = new ColorDialog { Color = _color, FullOpen = true }; if (picker.ShowDialog(this) == DialogResult.OK) { _color = picker.Color; RefreshColor(); } };
+        _colorButton.Click += (_, _) => PreviewChanged?.Invoke(this, EventArgs.Empty);
+        _alpha.ValueChanged += (_, _) => PreviewChanged?.Invoke(this, EventArgs.Empty);
         _colorButton.Enabled = colorEnabled;
         RefreshColor();
     }
     private void RefreshColor() { _colorButton.BackColor = _color; _colorButton.ForeColor = _color.GetBrightness() < .5F ? Color.White : Color.Black; }
+    internal void SetAlphaForTest(int percent) { _alpha.Value = Math.Clamp(percent, 0, 100); PreviewChanged?.Invoke(this, EventArgs.Empty); }
 }
 
 internal sealed class OverlayStyleDialog : Form
@@ -231,7 +235,7 @@ internal sealed class OverlayStyleDialog : Form
         var cancel = new Button { Text = "取消", DialogResult = DialogResult.Cancel, Size = new Size(100, 38) };
         var ok = new Button { Text = "確定", DialogResult = DialogResult.OK, Size = new Size(100, 38) };
         buttons.Controls.AddRange([cancel, ok]); Controls.Add(table); Controls.Add(buttons); CancelButton = cancel;
-        _color.Click += (_, _) => ChooseColorWithAlpha(ref _selectedColor, ref _selectedOpacity, _color, true); _gradientColor.Click += (_, _) => ChooseColorWithAlpha(ref _selectedGradientColor, ref _selectedGradientOpacity, _gradientColor, false); _textColor.Click += (_, _) => ChooseColor(ref _selectedTextColor, _textColor);
+        _color.Click += (_, _) => ChooseColorWithAlpha(true); _gradientColor.Click += (_, _) => ChooseColorWithAlpha(false); _textColor.Click += (_, _) => ChooseColor(ref _selectedTextColor, _textColor);
         _systemColor.CheckedChanged += (_, _) => UpdatePreview(); _gradient.CheckedChanged += (_, _) => UpdatePreview();
         foreach (var slider in new[] { _gradientTransition, _fontSize, _lineHeight, _lineSpacing, _radius }) slider.ValueChanged += (_, _) => UpdatePreview();
         _family.SelectedIndexChanged += (_, _) => { UpdateWeightButtons(); UpdatePreview(); };
@@ -261,15 +265,27 @@ internal sealed class OverlayStyleDialog : Form
         if (picker.ShowDialog(this) != DialogResult.OK) return;
         target = picker.Color; if (disableSystemColor) _systemColor.Checked = false; UpdatePreview();
     }
-    private void ChooseColorWithAlpha(ref Color target, ref byte alpha, Button button, bool disableSystemColor)
+    private void ChooseColorWithAlpha(bool primary)
     {
-        var usingSystemColor = disableSystemColor && _systemColor.Checked;
-        using var dialog = new ColorWithAlphaDialog(usingSystemColor ? OverlayAppearanceSettings.GetWindowsThemeColor() : target, alpha, !usingSystemColor);
-        if (dialog.ShowDialog(this) != DialogResult.OK) return;
-        if (!usingSystemColor) target = dialog.SelectedColor;
-        alpha = dialog.SelectedAlpha;
-        if (disableSystemColor && !usingSystemColor) _systemColor.Checked = false;
-        UpdatePreview();
+        var originalColor = primary ? _selectedColor : _selectedGradientColor;
+        var originalAlpha = primary ? _selectedOpacity : _selectedGradientOpacity;
+        var usingSystemColor = primary && _systemColor.Checked;
+        using var dialog = new ColorWithAlphaDialog(usingSystemColor ? OverlayAppearanceSettings.GetWindowsThemeColor() : originalColor, originalAlpha, !usingSystemColor);
+        void ApplyDialogValue()
+        {
+            if (primary) { if (!usingSystemColor) _selectedColor = dialog.SelectedColor; _selectedOpacity = dialog.SelectedAlpha; }
+            else { _selectedGradientColor = dialog.SelectedColor; _selectedGradientOpacity = dialog.SelectedAlpha; }
+            UpdatePreview();
+        }
+        dialog.PreviewChanged += (_, _) => ApplyDialogValue();
+        var result = dialog.ShowDialog(this);
+        if (result == DialogResult.OK) ApplyDialogValue();
+        else
+        {
+            if (primary) { _selectedColor = originalColor; _selectedOpacity = originalAlpha; }
+            else { _selectedGradientColor = originalColor; _selectedGradientOpacity = originalAlpha; }
+            UpdatePreview();
+        }
     }
     private void UpdatePreview()
     {
@@ -357,7 +373,10 @@ internal static class OverlayAppearanceSettings
         var result = fallback.Clone();
         try
         {
-            using var key = Registry.CurrentUser.OpenSubKey(OverlaySettings.GetSettingsKey(identity)); if (key is null) return result;
+            using var profileKey = Registry.CurrentUser.OpenSubKey(OverlaySettings.GetSettingsKey(identity));
+            using var legacyKey = profileKey?.GetValue("BackgroundColor") is int ? null : Registry.CurrentUser.OpenSubKey(OverlaySettings.GetLegacySettingsKey(identity));
+            var key = profileKey?.GetValue("BackgroundColor") is int ? profileKey : legacyKey;
+            if (key is null) return result;
             if (key.GetValue("BackgroundColor") is int rgb) result.BackgroundColor = Color.FromArgb((rgb >> 16) & 255, (rgb >> 8) & 255, rgb & 255);
             if (key.GetValue("BackgroundOpacity") is int opacity) result.BackgroundOpacity = (byte)Math.Clamp(opacity, 0, 255);
             if (key.GetValue("FollowThemeColor") is int follow) result.FollowThemeColor = follow != 0;

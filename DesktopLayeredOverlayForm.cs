@@ -17,6 +17,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
     private const int ContentPadding = 10;
     private readonly System.Windows.Forms.Timer _hoverTimer = new() { Interval = 100 };
     private readonly List<LayeredEntry> _entries = [];
+    private readonly HashSet<string> _excludedPaths = new(StringComparer.OrdinalIgnoreCase);
     private readonly FileSystemWatcher? _personalWatcher;
     private readonly FileSystemWatcher? _publicWatcher;
     private readonly string? _folderPath;
@@ -59,8 +60,10 @@ internal sealed class DesktopLayeredOverlayForm : Form
     public event EventHandler? CheckUpdateRequested;
     public string? FolderPath => _folderPath;
     public bool IsCustomList => _customList is not null;
+    public Guid? CustomListId => _customList?.Id;
     public bool IsFloating => _isFloating;
     internal IReadOnlyList<string> ContextMenuLabels => _menu?.Items.Cast<ToolStripItem>().Select(value => value.Text ?? "").ToArray() ?? [];
+    internal IReadOnlyList<string> EntryPaths => _entries.Select(value => value.Path).ToArray();
     internal Func<DesktopLayeredOverlayForm, Rectangle, Rectangle>? ResolvePlacement;
     private string? SettingsIdentity => _customList is null ? _folderPath : $"custom:{_customList.Id:N}";
 
@@ -88,7 +91,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
         _backgroundOpacity = _style.BackgroundOpacity;
         _followThemeColor = _style.FollowThemeColor;
         _frameVisible = Environment.GetEnvironmentVariable("DESKTOP_LIST_QA_SHOW_FRAME") == "1";
-        _isFloating = Environment.GetEnvironmentVariable("DESKTOP_LIST_QA_FLOATING") == "1";
+        _isFloating = OverlaySettings.LoadFloating(SettingsIdentity) || Environment.GetEnvironmentVariable("DESKTOP_LIST_QA_FLOATING") == "1";
         SystemEvents.UserPreferenceChanged += HandleUserPreferenceChanged;
 
         _menu = BuildContextMenu();
@@ -196,6 +199,21 @@ internal sealed class DesktopLayeredOverlayForm : Form
         RenderLayer();
     }
 
+    public void SetExcludedPaths(IEnumerable<string> paths)
+    {
+        _excludedPaths.Clear();
+        foreach (var path in paths.Where(value => !string.IsNullOrWhiteSpace(value)))
+            _excludedPaths.Add(path == DesktopOverlayEntry.RecycleBinPath ? path : Path.GetFullPath(path));
+        ReloadItems();
+    }
+
+    public void PersistState()
+    {
+        OverlaySettings.SaveBounds(SettingsIdentity, Bounds);
+        OverlaySettings.SaveFloating(SettingsIdentity, _isFloating);
+        OverlayAppearanceSettings.SaveStyle(SettingsIdentity, _style);
+    }
+
     private void ReloadItems()
     {
         var selectedPath = SelectedEntry?.Path;
@@ -206,6 +224,8 @@ internal sealed class DesktopLayeredOverlayForm : Form
         var sourceEntries = _customList is null
             ? DesktopOverlayEntry.Load(_folderPath)
             : DesktopOverlayEntry.LoadPaths(_customList.Paths);
+        if (_customList is null && _folderPath is null && _excludedPaths.Count > 0)
+            sourceEntries = sourceEntries.Where(entry => !_excludedPaths.Contains(entry.Path)).ToArray();
         foreach (var entry in OrderEntries(sourceEntries))
         {
             var icon = DesktopOverlayEntry.GetIcon(entry.Path, entry.IsDirectory) ??
@@ -611,11 +631,11 @@ internal sealed class DesktopLayeredOverlayForm : Form
     {
         var original = _style.Clone();
         using var dialog = new OverlayStyleDialog(_style.Clone(), "清單");
-        dialog.PreviewChanged += (_, _) => ApplyStyle(dialog.SelectedStyle, save: false);
+        dialog.PreviewChanged += (_, _) => ApplyStyle(dialog.SelectedStyle, save: true);
         if (dialog.ShowDialog(this) == DialogResult.OK)
             ApplyStyle(dialog.SelectedStyle, save: true);
         else
-            ApplyStyle(original, save: false);
+            ApplyStyle(original, save: true);
     }
 
     private void ApplyStyle(OverlayStyleOptions style, bool save)
@@ -641,6 +661,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
     private void MakeFloating()
     {
         _isFloating = true;
+        OverlaySettings.SaveFloating(SettingsIdentity, true);
         TopMost = true;
         SetWindowPos(Handle, new IntPtr(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010);
         RenderLayer();
@@ -649,6 +670,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
     private void ReturnToDesktop()
     {
         _isFloating = false;
+        OverlaySettings.SaveFloating(SettingsIdentity, false);
         TopMost = false;
         if (ResolvePlacement is not null)
             Bounds = ResolvePlacement(this, Bounds);
@@ -778,7 +800,16 @@ internal sealed class DesktopLayeredOverlayForm : Form
         if (effect == DragDropEffects.None && !_dragCancelled && !Bounds.Contains(dropPoint) && IsDesktopSurfaceAt(dropPoint))
             CreateCustomListRequested?.Invoke(this, new CustomListRequestedEventArgs(_entries[index].Path, dropPoint));
         if (effect != DragDropEffects.None)
+        {
+            if (_customList is not null && effect == DragDropEffects.Move && !Bounds.Contains(dropPoint))
+            {
+                _customList.Paths.RemoveAll(path => string.Equals(path, _entries[index].Path, StringComparison.OrdinalIgnoreCase));
+                var becameEmpty = _customList.Paths.Count == 0;
+                CustomPathsChanged?.Invoke(this, EventArgs.Empty);
+                if (becameEmpty) { CloseListRequested?.Invoke(this, EventArgs.Empty); return; }
+            }
             ReloadItems();
+        }
     }
 
     private void HandleDragEnter(object? sender, DragEventArgs e) => UpdateDragTarget(e);
@@ -807,7 +838,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
         }
         _dropInsertIndex = _dropFolderIndex >= 0 ? -1 : GetInsertionIndex(client);
         _dropIsCopy = (e.KeyState & 8) != 0;
-        e.Effect = _dropIsCopy ? DragDropEffects.Copy : DragDropEffects.Move;
+        e.Effect = _dropIsArchive || _dropIsCopy ? DragDropEffects.Copy : DragDropEffects.Move;
         RenderLayer();
     }
 

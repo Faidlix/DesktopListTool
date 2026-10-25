@@ -14,7 +14,9 @@ internal static class OverlayOrderSettings
     {
         try
         {
-            using var key = Registry.CurrentUser.OpenSubKey(OverlaySettings.GetSettingsKey(folderPath));
+            using var profileKey = Registry.CurrentUser.OpenSubKey(OverlaySettings.GetSettingsKey(folderPath));
+            using var legacyKey = profileKey?.GetValue("SortMode") is string ? null : Registry.CurrentUser.OpenSubKey(OverlaySettings.GetLegacySettingsKey(folderPath));
+            var key = profileKey?.GetValue("SortMode") is string ? profileKey : legacyKey;
             var mode = Enum.TryParse<OverlaySortMode>(key?.GetValue("SortMode") as string, out var parsed)
                 ? parsed : OverlaySortMode.Name;
             var ascending = key?.GetValue("SortAscending") is not int value || value != 0;
@@ -41,8 +43,9 @@ internal static class OverlayOrderSettings
     {
         try
         {
-            using var key = Registry.CurrentUser.OpenSubKey(OverlaySettings.GetSettingsKey(folderPath));
-            return key?.GetValue("CustomOrder") as string[] ?? [];
+            using var profileKey = Registry.CurrentUser.OpenSubKey(OverlaySettings.GetSettingsKey(folderPath));
+            using var legacyKey = profileKey?.GetValue("CustomOrder") is string[] ? null : Registry.CurrentUser.OpenSubKey(OverlaySettings.GetLegacySettingsKey(folderPath));
+            return (profileKey?.GetValue("CustomOrder") ?? legacyKey?.GetValue("CustomOrder")) as string[] ?? [];
         }
         catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException) { return []; }
     }

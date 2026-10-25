@@ -184,14 +184,19 @@ internal sealed class DesktopViewApplicationContext : ApplicationContext
         };
         _trayIcon.DoubleClick += (_, _) => _overlay.RevealFrame();
         _overlay.Show();
-        foreach (var folder in PinnedFolderSettings.Load())
+        var pinnedFolders = PinnedFolderSettings.Load();
+        foreach (var folder in pinnedFolders)
             CreateFolderOverlay(folder, save: false);
+        PinnedFolderSettings.SaveSnapshot(pinnedFolders);
         _customLists.AddRange(CustomListSettings.Load());
         foreach (var customList in _customLists.ToArray())
             CreateCustomListOverlay(customList, save: false);
+        CustomListSettings.Save(_customLists);
+        RefreshDetachedDesktopItems();
         _notes.AddRange(DesktopNotesSettings.Load());
         foreach (var note in _notes)
             ShowNote(note);
+        SaveNotes();
         _blankClickMonitor = new DesktopBlankClickMonitor(HandleDesktopBlankClick);
         WriteQaLayoutIfRequested();
         if (AutoUpdateManager.IsEnabled)
@@ -257,7 +262,7 @@ internal sealed class DesktopViewApplicationContext : ApplicationContext
         AttachPlacementAndCustomListEvents(folderOverlay);
         folderOverlay.FormClosed += (_, _) => _folderOverlays.Remove(folderOverlay);
         _folderOverlays.Add(folderOverlay);
-        folderOverlay.SetBoundsWithoutSaving(FindFreePlacement(folderOverlay.Bounds, folderOverlay));
+        if (save) folderOverlay.SetBoundsWithoutSaving(FindFreePlacement(folderOverlay.Bounds, folderOverlay));
         OverlaySettings.SaveBounds(fullPath, folderOverlay.Bounds);
         folderOverlay.Show();
         if (save)
@@ -277,8 +282,12 @@ internal sealed class DesktopViewApplicationContext : ApplicationContext
     {
         if (!File.Exists(path) && !Directory.Exists(path) && path != DesktopOverlayEntry.RecycleBinPath)
             return;
+        var existingData = _customLists.FirstOrDefault(value => value.Paths.Contains(path, StringComparer.OrdinalIgnoreCase));
+        var existingOverlay = existingData is null ? null : _customOverlays.FirstOrDefault(value => value.CustomListId == existingData.Id);
+        if (existingOverlay is not null) { existingOverlay.RevealFrame(); return; }
         var data = new CustomListData { Paths = [path] };
         _customLists.Add(data);
+        RefreshDetachedDesktopItems();
         var defaultBounds = new Rectangle(screenLocation.X - 24, screenLocation.Y - 24, 360, 180);
         CreateCustomListOverlay(data, save: true, defaultBounds);
     }
@@ -297,14 +306,15 @@ internal sealed class DesktopViewApplicationContext : ApplicationContext
         overlay.AddFolderRequested += (_, _) => ChooseFolder();
         overlay.AddNoteRequested += (_, e) => CreateNote(e.ScreenLocation);
         overlay.CloseListRequested += (_, _) => CloseCustomListOverlay(overlay, data);
-        overlay.CustomPathsChanged += (_, _) => CustomListSettings.Save(_customLists);
+        overlay.CustomPathsChanged += (_, _) => { CustomListSettings.Save(_customLists); RefreshDetachedDesktopItems(); };
         AttachPlacementAndCustomListEvents(overlay);
         overlay.FormClosed += (_, _) => _customOverlays.Remove(overlay);
         _customOverlays.Add(overlay);
-        overlay.SetBoundsWithoutSaving(FindFreePlacement(overlay.Bounds, overlay));
+        if (save) overlay.SetBoundsWithoutSaving(FindFreePlacement(overlay.Bounds, overlay));
         OverlaySettings.SaveBounds($"custom:{data.Id:N}", overlay.Bounds);
         overlay.Show();
         if (save) CustomListSettings.Save(_customLists);
+        RefreshDetachedDesktopItems();
     }
 
     private void CloseCustomListOverlay(DesktopLayeredOverlayForm overlay, CustomListData data)
@@ -312,8 +322,14 @@ internal sealed class DesktopViewApplicationContext : ApplicationContext
         _customOverlays.Remove(overlay);
         _customLists.Remove(data);
         CustomListSettings.Save(_customLists);
+        RefreshDetachedDesktopItems();
         overlay.Close();
         overlay.Dispose();
+    }
+
+    private void RefreshDetachedDesktopItems()
+    {
+        _overlay.SetExcludedPaths(_customLists.SelectMany(value => value.Paths));
     }
 
     private void AttachPlacementAndCustomListEvents(DesktopLayeredOverlayForm overlay)
@@ -415,6 +431,8 @@ internal sealed class DesktopViewApplicationContext : ApplicationContext
             Bounds = new Rectangle(screenLocation.X, screenLocation.Y, 340, 260)
         };
         note.Bounds = DesktopLayeredOverlayForm.ConstrainRectangle(note.Bounds, Screen.FromPoint(screenLocation).WorkingArea);
+        var placement = DisplayLayoutIdentity.CapturePlacement(note.Bounds);
+        note.MonitorDeviceName = placement.DeviceName; note.MonitorRelativeX = placement.RelativeX; note.MonitorRelativeY = placement.RelativeY;
         _notes.Add(note);
         ShowNote(note);
         SaveNotes();
@@ -460,6 +478,9 @@ internal sealed class DesktopViewApplicationContext : ApplicationContext
 
     protected override void ExitThreadCore()
     {
+        foreach (var overlay in AllListOverlays().Where(value => !value.IsDisposed)) overlay.PersistState();
+        foreach (var noteForm in _noteForms.Where(value => !value.IsDisposed)) noteForm.PersistState();
+        CustomListSettings.Save(_customLists); SaveNotes();
         _blankClickMonitor.Dispose();
         _trayIcon.Visible = false;
         _trayIcon.Dispose();
@@ -744,8 +765,9 @@ internal static class PinnedFolderSettings
     {
         try
         {
-            using var key = Registry.CurrentUser.OpenSubKey(SettingsKey);
-            return (key?.GetValue(ValueName) as string[] ?? [])
+            using var profileKey = Registry.CurrentUser.OpenSubKey(DisplayLayoutIdentity.CurrentProfileKey);
+            using var legacyKey = profileKey?.GetValue(ValueName) is string[] ? null : Registry.CurrentUser.OpenSubKey(SettingsKey);
+            return (((profileKey?.GetValue(ValueName) ?? legacyKey?.GetValue(ValueName)) as string[]) ?? [])
                 .Where(Directory.Exists)
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToArray();
@@ -768,15 +790,14 @@ internal static class PinnedFolderSettings
         Save(Load().Where(value => !string.Equals(value, fullPath, StringComparison.OrdinalIgnoreCase)).ToArray());
     }
 
+    public static void SaveSnapshot(IEnumerable<string> folderPaths) => Save(folderPaths.Where(Directory.Exists).Distinct(StringComparer.OrdinalIgnoreCase).ToArray());
+
     private static void Save(string[] values)
     {
         try
         {
-            using var key = Registry.CurrentUser.CreateSubKey(SettingsKey);
-            if (values.Length == 0)
-                key.DeleteValue(ValueName, throwOnMissingValue: false);
-            else
-                key.SetValue(ValueName, values, RegistryValueKind.MultiString);
+            using var key = Registry.CurrentUser.CreateSubKey(DisplayLayoutIdentity.CurrentProfileKey);
+            key.SetValue(ValueName, values, RegistryValueKind.MultiString);
         }
         catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException)
         {
@@ -1137,6 +1158,26 @@ internal static class SmokeTests
             Assert(DesktopLayeredOverlayForm.ConstrainRectangle(new Rectangle(-9, 200, 400, 500), workArea).X == 0, "left overflow constrained");
             Assert(DesktopLayeredOverlayForm.ConstrainRectangle(new Rectangle(1530, 200, 400, 500), workArea).Right == 1920, "right overflow constrained");
             Assert(DesktopLayeredOverlayForm.ConstrainRectangle(new Rectangle(400, 560, 400, 500), workArea).Bottom == 1040, "bottom overflow constrained");
+            Assert(OverlaySettings.GetSettingsKey("custom:smoke").Contains(DisplayLayoutIdentity.CurrentId, StringComparison.Ordinal), "list settings are isolated by display layout");
+            var currentScreen = Screen.PrimaryScreen ?? Screen.AllScreens[0];
+            var sampleBounds = new Rectangle(currentScreen.WorkingArea.Left + 73, currentScreen.WorkingArea.Top + 41, 360, 220);
+            var samplePlacement = DisplayLayoutIdentity.CapturePlacement(sampleBounds);
+            Assert(DisplayLayoutIdentity.RestoreBounds(sampleBounds, samplePlacement.DeviceName, samplePlacement.RelativeX, samplePlacement.RelativeY, sampleBounds) == sampleBounds, "monitor-relative placement round trips");
+            if (Environment.GetEnvironmentVariable("DESKTOP_LIST_QA_REGISTRY") == "1")
+            {
+                var stateIdentity = $"custom:smoke-{Guid.NewGuid():N}";
+                try
+                {
+                    OverlaySettings.SaveBounds(stateIdentity, sampleBounds); OverlaySettings.SaveFloating(stateIdentity, true);
+                    var savedStyle = new OverlayStyleOptions { BackgroundColor = Color.MediumPurple, BackgroundOpacity = 123, GradientOpacity = 77, FontSize = 13F, LineHeight = 44 };
+                    OverlayAppearanceSettings.SaveStyle(stateIdentity, savedStyle);
+                    var loadedStyle = OverlayAppearanceSettings.LoadStyle(stateIdentity, new OverlayStyleOptions());
+                    var loadedBounds = OverlaySettings.LoadBounds(stateIdentity, Rectangle.Empty); var loadedFloating = OverlaySettings.LoadFloating(stateIdentity);
+                    Assert(loadedBounds == sampleBounds && loadedFloating, $"list position and floating state persist for current display layout ({loadedBounds}, floating={loadedFloating})");
+                    Assert(loadedStyle.BackgroundColor.ToArgb() == Color.MediumPurple.ToArgb() && loadedStyle.BackgroundOpacity == 123 && loadedStyle.GradientOpacity == 77 && loadedStyle.LineHeight == 44, "list style persists for current display layout");
+                }
+                finally { Registry.CurrentUser.DeleteSubKeyTree(OverlaySettings.GetLegacySettingsKey(stateIdentity), false); }
+            }
             var placed = DesktopViewApplicationContext.FindFreeListPlacement(
                 new Rectangle(20, 20, 360, 240), workArea, [new Rectangle(0, 0, 500, 600)]);
             Assert(!placed.IntersectsWith(new Rectangle(0, 0, 500, 600)) && workArea.Contains(placed), "new lists avoid existing lists");
@@ -1150,6 +1191,8 @@ internal static class SmokeTests
             {
                 Assert(overlayConstruction.Width >= overlayConstruction.MinimumSize.Width, "overlay constructs before resize callbacks");
                 Assert(overlayConstruction.ContextMenuLabels.Contains("複製樣式") && overlayConstruction.ContextMenuLabels.Contains("貼上樣式"), "list menu exposes style copy and paste");
+                var detachable = overlayConstruction.EntryPaths.FirstOrDefault(value => value != DesktopOverlayEntry.RecycleBinPath);
+                if (detachable is not null) { overlayConstruction.SetExcludedPaths([detachable]); Assert(!overlayConstruction.EntryPaths.Contains(detachable, StringComparer.OrdinalIgnoreCase), "detached desktop item is hidden from main list"); overlayConstruction.SetExcludedPaths([]); }
             }
 
             var referenceRoot = Path.Combine(Path.GetTempPath(), $"DesktopListTool-Reference-{Guid.NewGuid():N}");
@@ -1212,6 +1255,12 @@ internal static class SmokeTests
                     image.Save(appearanceQa);
                     appearance.Hide();
                 }
+            }
+
+            using (var colorAlpha = new ColorWithAlphaDialog(Color.Black, 64))
+            {
+                var liveEvents = 0; colorAlpha.PreviewChanged += (_, _) => liveEvents++; colorAlpha.SetAlphaForTest(72);
+                Assert(liveEvents == 1 && Math.Abs(colorAlpha.SelectedAlpha - 184) <= 1, "color opacity changes publish live preview events");
             }
 
             var transferRoot = Path.Combine(Path.GetTempPath(), $"DesktopListTool-Smoke-{Guid.NewGuid():N}");

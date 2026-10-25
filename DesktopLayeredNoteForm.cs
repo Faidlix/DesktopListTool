@@ -55,7 +55,10 @@ internal sealed class DesktopLayeredNoteForm : Form
         FormBorderStyle = FormBorderStyle.None;
         StartPosition = FormStartPosition.Manual;
         MinimumSize = new Size(240, 140);
-        Bounds = DesktopLayeredOverlayForm.ConstrainRectangle(data.Bounds, Screen.FromRectangle(data.Bounds).WorkingArea);
+        var primary = Screen.PrimaryScreen?.WorkingArea ?? new Rectangle(0, 0, 1920, 1080);
+        Bounds = DisplayLayoutIdentity.RestoreBounds(data.Bounds, data.MonitorDeviceName, data.MonitorRelativeX, data.MonitorRelativeY,
+            new Rectangle(primary.Left + 40, primary.Top + 40, data.Bounds.Width, data.Bounds.Height));
+        CapturePlacement();
         _style = StyleFromData(data);
         _followTheme = _style.FollowThemeColor;
         _backgroundColor = _followTheme ? OverlayAppearanceSettings.GetWindowsThemeColor() : _style.BackgroundColor;
@@ -100,6 +103,7 @@ internal sealed class DesktopLayeredNoteForm : Form
     {
         _scrollOffset += delta; ClampScroll(); RenderLayer();
     }
+    public void PersistState() => CapturePlacement();
     protected override bool ShowWithoutActivation => true;
 
     protected override CreateParams CreateParams
@@ -507,11 +511,11 @@ internal sealed class DesktopLayeredNoteForm : Form
     {
         var original = _style.Clone();
         using var dialog = new OverlayStyleDialog(_style.Clone(), "便籤");
-        dialog.PreviewChanged += (_, _) => ApplyStyle(dialog.SelectedStyle, false);
+        dialog.PreviewChanged += (_, _) => ApplyStyle(dialog.SelectedStyle, true);
         if (dialog.ShowDialog(this) == DialogResult.OK)
             ApplyStyle(dialog.SelectedStyle, true);
         else
-            ApplyStyle(original, false);
+            ApplyStyle(original, true);
     }
 
     private void ApplyStyle(OverlayStyleOptions style, bool save)
@@ -619,7 +623,7 @@ internal sealed class DesktopLayeredNoteForm : Form
         if (message.Msg == WmExitSizeMove)
         {
             Bounds = DesktopLayeredOverlayForm.ConstrainRectangle(Bounds, Screen.FromRectangle(Bounds).WorkingArea);
-            _data.Bounds = Bounds;
+            CapturePlacement();
             NoteChanged?.Invoke(this, EventArgs.Empty);
         }
         else if (message.Msg == WmNcHitTest && _frameVisible)
@@ -632,6 +636,15 @@ internal sealed class DesktopLayeredNoteForm : Form
             else if (client.X >= ClientSize.Width - 18 && client.Y >= ClientSize.Height - 18) message.Result = (IntPtr)17;
             else if (client.X < 10 || client.Y < 10 || client.X > ClientSize.Width - 10 || client.Y > ClientSize.Height - 10) message.Result = (IntPtr)2;
         }
+    }
+
+    private void CapturePlacement()
+    {
+        _data.Bounds = Bounds;
+        var placement = DisplayLayoutIdentity.CapturePlacement(Bounds);
+        _data.MonitorDeviceName = placement.DeviceName;
+        _data.MonitorRelativeX = placement.RelativeX;
+        _data.MonitorRelativeY = placement.RelativeY;
     }
 
     private void ApplyLayeredBitmap(Bitmap bitmap)

@@ -1,6 +1,6 @@
 // 功能：建立、顯示、編輯與保存桌面便籤，支援 Markdown、多段文字及會自動移到底部的勾選事項。
 // 使用：在清單空白處右鍵選「新增便籤」；Enter 換行，只有點「確定」才保存，Esc 取消。
-// 設定：便籤右鍵可編輯或刪除；位置、大小、內容與勾選狀態保存於目前使用者登錄設定。
+// 設定：便籤右鍵可編輯或刪除；位置、大小、內容與勾選狀態依單／多螢幕配置保存於目前使用者登錄設定。
 
 using System.Runtime.InteropServices;
 using System.Text.Json;
@@ -36,6 +36,9 @@ internal sealed class DesktopNoteData
     public int CornerRadius { get; set; }
     public OverlayTextAlignment TextAlignment { get; set; }
     public OverlayContentDistribution Distribution { get; set; }
+    public string? MonitorDeviceName { get; set; }
+    public int? MonitorRelativeX { get; set; }
+    public int? MonitorRelativeY { get; set; }
 
     public Rectangle Bounds
     {
@@ -79,8 +82,9 @@ internal static class DesktopNotesSettings
             var qaJson = Environment.GetEnvironmentVariable("DESKTOP_LIST_QA_NOTES_JSON");
             if (!string.IsNullOrWhiteSpace(qaJson))
                 return JsonSerializer.Deserialize<List<DesktopNoteData>>(qaJson, JsonOptions) ?? [];
-            using var key = Registry.CurrentUser.OpenSubKey(SettingsKey);
-            var json = key?.GetValue(ValueName) as string;
+            using var profileKey = Registry.CurrentUser.OpenSubKey(DisplayLayoutIdentity.CurrentProfileKey);
+            using var legacyKey = profileKey?.GetValue(ValueName) is string ? null : Registry.CurrentUser.OpenSubKey(SettingsKey);
+            var json = (profileKey?.GetValue(ValueName) ?? legacyKey?.GetValue(ValueName)) as string;
             return string.IsNullOrWhiteSpace(json)
                 ? []
                 : JsonSerializer.Deserialize<List<DesktopNoteData>>(json, JsonOptions) ?? [];
@@ -95,12 +99,9 @@ internal static class DesktopNotesSettings
     {
         try
         {
-            using var key = Registry.CurrentUser.CreateSubKey(SettingsKey);
+            using var key = Registry.CurrentUser.CreateSubKey(DisplayLayoutIdentity.CurrentProfileKey);
             var values = notes.ToArray();
-            if (values.Length == 0)
-                key.DeleteValue(ValueName, throwOnMissingValue: false);
-            else
-                key.SetValue(ValueName, JsonSerializer.Serialize(values, JsonOptions), RegistryValueKind.String);
+            key.SetValue(ValueName, JsonSerializer.Serialize(values, JsonOptions), RegistryValueKind.String);
         }
         catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException)
         {

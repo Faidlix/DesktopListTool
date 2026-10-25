@@ -331,15 +331,18 @@ internal static class OverlaySettings
         var fallback = defaultBounds ?? new Rectangle(working.Left + 24, working.Top + 24, 360, 520);
         try
         {
-            using var key = Registry.CurrentUser.OpenSubKey(GetSettingsKey(folderPath));
+            using var profileKey = Registry.CurrentUser.OpenSubKey(GetSettingsKey(folderPath));
+            using var legacyKey = profileKey?.GetValue("OverlayWidth") is int ? null : Registry.CurrentUser.OpenSubKey(GetLegacySettingsKey(folderPath));
+            var key = profileKey?.GetValue("OverlayWidth") is int ? profileKey : legacyKey;
             var x = ReadInt(key, "OverlayX", fallback.X);
             var y = ReadInt(key, "OverlayY", fallback.Y);
             var width = ReadInt(key, "OverlayWidth", fallback.Width);
             var height = ReadInt(key, "OverlayHeight", fallback.Height);
             var bounds = new Rectangle(x, y, Math.Max(220, width), Math.Max(180, height));
-            return Screen.AllScreens.Any(screen => screen.WorkingArea.IntersectsWith(bounds))
-                ? bounds
-                : fallback;
+            var monitor = key?.GetValue("MonitorDeviceName") as string;
+            var relativeX = key?.GetValue("MonitorRelativeX") as int?;
+            var relativeY = key?.GetValue("MonitorRelativeY") as int?;
+            return DisplayLayoutIdentity.RestoreBounds(bounds, monitor, relativeX, relativeY, fallback);
         }
         catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException)
         {
@@ -358,15 +361,39 @@ internal static class OverlaySettings
             key.SetValue("OverlayY", bounds.Y, RegistryValueKind.DWord);
             key.SetValue("OverlayWidth", bounds.Width, RegistryValueKind.DWord);
             key.SetValue("OverlayHeight", bounds.Height, RegistryValueKind.DWord);
+            var placement = DisplayLayoutIdentity.CapturePlacement(bounds);
+            key.SetValue("MonitorDeviceName", placement.DeviceName, RegistryValueKind.String);
+            key.SetValue("MonitorRelativeX", placement.RelativeX, RegistryValueKind.DWord);
+            key.SetValue("MonitorRelativeY", placement.RelativeY, RegistryValueKind.DWord);
         }
         catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException)
         {
         }
     }
 
+    public static bool LoadFloating(string? identity)
+    {
+        try
+        {
+            using var profileKey = Registry.CurrentUser.OpenSubKey(GetSettingsKey(identity));
+            using var legacyKey = profileKey?.GetValue("IsFloating") is int ? null : Registry.CurrentUser.OpenSubKey(GetLegacySettingsKey(identity));
+            return (profileKey?.GetValue("IsFloating") ?? legacyKey?.GetValue("IsFloating")) is int value && value != 0;
+        }
+        catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException) { return false; }
+    }
+
+    public static void SaveFloating(string? identity, bool floating)
+    {
+        try { using var key = Registry.CurrentUser.CreateSubKey(GetSettingsKey(identity)); key.SetValue("IsFloating", floating ? 1 : 0, RegistryValueKind.DWord); }
+        catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException) { }
+    }
+
     private static int ReadInt(RegistryKey? key, string name, int fallback) => key?.GetValue(name) is int value ? value : fallback;
 
     internal static string GetSettingsKey(string? folderPath)
+        => $@"{GetLegacySettingsKey(folderPath)}\Layouts\{DisplayLayoutIdentity.CurrentId}";
+
+    internal static string GetLegacySettingsKey(string? folderPath)
     {
         if (string.IsNullOrWhiteSpace(folderPath))
             return SettingsKey;
