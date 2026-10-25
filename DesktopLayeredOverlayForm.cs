@@ -56,6 +56,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
     private bool _dropIsCopy;
     private Point _lastDragClientPoint;
     private ShortcutKeyHost? _shortcutKeyHost;
+    private ContextMenuStrip? _safeItemMenu;
 
     public event EventHandler? AddFolderRequested;
     public event EventHandler? CloseListRequested;
@@ -375,8 +376,12 @@ internal sealed class DesktopLayeredOverlayForm : Form
                 SelectIndex(index);
             else
                 ClearSelection();
-            if (index >= 0 && NativeShellContextMenu.TryShowIsolated(Handle, _entries[index].Path, _lastContextMenuScreenPoint, SchedulePhysicalRefresh))
-                return;
+            if (index >= 0)
+            {
+                var path = _entries[index].Path;
+                if (NativeShellContextMenu.TryShowIsolated(Handle, path, _lastContextMenuScreenPoint,
+                    fallbackRequired => HandleShellMenuCompleted(path, _lastContextMenuScreenPoint, fallbackRequired))) return;
+            }
             _menu?.Show(this, e.Location);
             return;
         }
@@ -976,9 +981,14 @@ internal sealed class DesktopLayeredOverlayForm : Form
     private void CopySelectedToClipboard(bool cut)
     {
         if (SelectedEntry is not { } entry || entry.IsVirtual) return;
+        SetPathClipboard(entry.Path, cut);
+    }
+
+    private static void SetPathClipboard(string path, bool cut)
+    {
         try
         {
-            var data = new DataObject(); var files = new StringCollection { entry.Path }; data.SetFileDropList(files);
+            var data = new DataObject(); var files = new StringCollection { path }; data.SetFileDropList(files);
             data.SetData("Preferred DropEffect", new MemoryStream(BitConverter.GetBytes(cut ? 2 : 1)));
             Clipboard.SetDataObject(data, true);
         }
@@ -1030,15 +1040,20 @@ internal sealed class DesktopLayeredOverlayForm : Form
     private void DeleteSelectedToRecycleBin()
     {
         if (SelectedEntry is not { IsVirtual: false } entry) return;
+        DeletePathToRecycleBin(entry.Path);
+    }
+
+    private void DeletePathToRecycleBin(string path)
+    {
         try
         {
-            MovePathsToRecycleBin([entry.Path]);
+            MovePathsToRecycleBin([path]);
             if (_customList is not null)
             {
-                _customList.Paths.RemoveAll(path => string.Equals(path, entry.Path, StringComparison.OrdinalIgnoreCase));
+                _customList.Paths.RemoveAll(value => string.Equals(value, path, StringComparison.OrdinalIgnoreCase));
                 CustomPathsChanged?.Invoke(this, EventArgs.Empty);
             }
-            else if (_referencePaths.Remove(entry.Path)) OverlayOrderSettings.SaveReferencePaths(SettingsIdentity, _referencePaths);
+            else if (_referencePaths.Remove(path)) OverlayOrderSettings.SaveReferencePaths(SettingsIdentity, _referencePaths);
             _selectedIndex = -1;
             ReloadItems();
             PhysicalPathsChanged?.Invoke(this, EventArgs.Empty);
@@ -1458,7 +1473,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
         catch (InvalidOperationException) { }
     }
 
-    private void SchedulePhysicalRefresh()
+    private void HandleShellMenuCompleted(string path, Point screenPoint, bool fallbackRequired)
     {
         if (IsDisposed || Disposing || !IsHandleCreated) return;
         try
@@ -1467,10 +1482,41 @@ internal sealed class DesktopLayeredOverlayForm : Form
             {
                 ReloadItems();
                 PhysicalPathsChanged?.Invoke(this, EventArgs.Empty);
+                if (fallbackRequired && (File.Exists(path) || Directory.Exists(path))) ShowSafeItemMenu(path, screenPoint);
             });
         }
         catch (ObjectDisposedException) { }
         catch (InvalidOperationException) { }
+    }
+
+    private void ShowSafeItemMenu(string path, Point screenPoint)
+    {
+        _safeItemMenu?.Close(); _safeItemMenu?.Dispose();
+        var menu = new ContextMenuStrip(); _safeItemMenu = menu;
+        menu.Items.Add("開啟", null, (_, _) => OpenPath(path));
+        menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add("複製", null, (_, _) => SetPathClipboard(path, cut: false));
+        menu.Items.Add("剪下", null, (_, _) => SetPathClipboard(path, cut: true));
+        menu.Items.Add("刪除", null, (_, _) => DeletePathToRecycleBin(path));
+        menu.Items.Add(new ToolStripSeparator());
+        menu.Items.Add("內容", null, (_, _) => ShowSafeProperties(path));
+        menu.Closed += (_, _) => { if (ReferenceEquals(_safeItemMenu, menu)) _safeItemMenu = null; menu.Dispose(); };
+        menu.Show(screenPoint);
+    }
+
+    private static void OpenPath(string path)
+    {
+        try { Process.Start(new ProcessStartInfo(path) { UseShellExecute = true }); }
+        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            MessageBox.Show(ex.Message, "無法開啟", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    private static void ShowSafeProperties(string path)
+    {
+        if (!NativeShellContextMenu.TryShowPropertiesIsolated(path))
+            MessageBox.Show("無法啟動內容視窗。", "內容", MessageBoxButtons.OK, MessageBoxIcon.Error);
     }
 
     protected override void WndProc(ref Message message)
@@ -1609,6 +1655,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
             _personalWatcher?.Dispose();
             _publicWatcher?.Dispose();
             _menu?.Dispose();
+            _safeItemMenu?.Dispose();
             CloseShortcutKeyHost();
             _itemFont?.Dispose();
             SystemEvents.UserPreferenceChanged -= HandleUserPreferenceChanged;

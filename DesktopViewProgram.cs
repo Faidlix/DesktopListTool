@@ -1,5 +1,5 @@
 // 功能：管理桌面清單、資料夾清單、單項清單與便籤，保存配置並協調非懸浮物件的避讓位置。
-// 使用：由 --list compact|standard|large 啟動；新建物件尋找空位，手動拖曳時才暫時擠開衝突物件。
+// 使用：由 --list compact|standard|large 啟動；--shell-menu／--shell-properties／--shell-menu-probe 只供隔離 Shell 程序使用。
 // 設定：內容、位置、樣式與懸浮狀態依單／多螢幕配置保存於目前使用者設定。
 
 using System.Diagnostics;
@@ -24,9 +24,23 @@ internal static class Program
 
         if (args.Length >= 4 && args[0].Equals("--shell-menu", StringComparison.OrdinalIgnoreCase))
         {
+            var shown = false;
             if (int.TryParse(args[2], out var x) && int.TryParse(args[3], out var y))
-                NativeShellContextMenu.TryShow(IntPtr.Zero, args[1], new Point(x, y));
-            return;
+                shown = NativeShellContextMenu.TryShow(IntPtr.Zero, args[1], new Point(x, y), statusPath: args.Length >= 5 ? args[4] : null);
+            Environment.Exit(shown ? 0 : 1);
+        }
+
+        if (args.Length >= 2 && args[0].Equals("--shell-properties", StringComparison.OrdinalIgnoreCase))
+        {
+            var shown = NativeShellContextMenu.ShowProperties(args[1]);
+            if (!shown) MessageBox.Show("無法顯示這個項目的內容。", "內容", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            Environment.Exit(shown ? 0 : 1);
+        }
+
+        if (args.Length >= 2 && args[0].Equals("--shell-menu-probe", StringComparison.OrdinalIgnoreCase))
+        {
+            var shown = NativeShellContextMenu.TryShow(IntPtr.Zero, args[1], Point.Empty, display: false);
+            Environment.Exit(shown ? 0 : 1);
         }
 
         if (args.Length >= 2 && args[0].Equals("--watchdog", StringComparison.OrdinalIgnoreCase))
@@ -1340,6 +1354,16 @@ internal static class SmokeTests
             using (var recycleIcon = DesktopOverlayEntry.GetIcon(DesktopOverlayEntry.RecycleBinPath, true))
                 Assert(recycleIcon is not null, "recycle bin icon available");
             Assert(DesktopOverlayEntry.LoadPaths([DesktopOverlayEntry.RecycleBinPath]).Single().IsVirtual, "custom list can contain the recycle bin reference");
+            Assert(NativeShellContextMenu.RequiresExtendedShellLifetime("properties") &&
+                NativeShellContextMenu.RequiresExtendedShellLifetime("PROPERTIES") &&
+                !NativeShellContextMenu.RequiresExtendedShellLifetime("open"), "properties commands keep the isolated Shell message loop alive without blocking later context menus");
+            Assert(NativeShellContextMenu.IsPropertiesCommand(null, "內容(&R)") &&
+                NativeShellContextMenu.IsPropertiesCommand(null, "屬性") &&
+                NativeShellContextMenu.IsPropertiesCommand(null, "Properties") &&
+                !NativeShellContextMenu.IsPropertiesCommand("open", "開啟"), "localized Properties menu text uses the reliable Shell properties path");
+            Assert(NativeShellContextMenu.RequiresSafeFallback(timedOut: false, exitCode: unchecked((int)0xC0000409), reachedMenu: false) &&
+                !NativeShellContextMenu.RequiresSafeFallback(timedOut: false, exitCode: unchecked((int)0xC0000409), reachedMenu: true) &&
+                !NativeShellContextMenu.RequiresSafeFallback(timedOut: false, exitCode: 0, reachedMenu: false), "Shell crashes before menu creation use the safe fallback without duplicating an already displayed menu");
             using (var overlayConstruction = new DesktopLayeredOverlayForm(ListItemSize.Standard))
             {
                 Assert(overlayConstruction.Width >= overlayConstruction.MinimumSize.Width, "overlay constructs before resize callbacks");
@@ -1358,7 +1382,8 @@ internal static class SmokeTests
             File.WriteAllText(secondReference, "second"); File.WriteAllText(thirdReference, "third");
             var referenced = DesktopOverlayEntry.LoadPaths([referenceFile]);
             Assert(referenced.Count == 1 && File.Exists(referenceFile), "custom list references without moving source");
-            Assert(NativeShellContextMenu.TryShow(IntPtr.Zero, referenceFile, Point.Empty, display: false), "native shell context menu marshaling");
+            for (var contextMenuCycle = 1; contextMenuCycle <= 20; contextMenuCycle++)
+                Assert(NativeShellContextMenu.ProbeIsolated(referenceFile), $"isolated native shell context menu cycle {contextMenuCycle}/20");
             var previousFloatingQa = Environment.GetEnvironmentVariable("DESKTOP_LIST_QA_FLOATING");
             Environment.SetEnvironmentVariable("DESKTOP_LIST_QA_FLOATING", "1");
             try
