@@ -1519,7 +1519,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
 
     private void ShowSafeItemMenu(string path, Point screenPoint)
     {
-        _safeItemMenu?.Close(); _safeItemMenu?.Dispose();
+        _safeItemMenu?.Close();
         var menu = new ContextMenuStrip(); _safeItemMenu = menu;
         menu.Items.Add("開啟", null, (_, _) => OpenPath(path));
         menu.Items.Add(new ToolStripSeparator());
@@ -1528,8 +1528,32 @@ internal sealed class DesktopLayeredOverlayForm : Form
         menu.Items.Add("刪除", null, (_, _) => DeletePathToRecycleBin(path));
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("內容", null, (_, _) => ShowSafeProperties(path));
-        menu.Closed += (_, _) => { if (ReferenceEquals(_safeItemMenu, menu)) _safeItemMenu = null; menu.Dispose(); };
+        menu.Closed += (_, _) =>
+        {
+            if (ReferenceEquals(_safeItemMenu, menu)) _safeItemMenu = null;
+            DisposeSafeItemMenuDeferred(menu);
+        };
         menu.Show(screenPoint);
+    }
+
+    private void DisposeSafeItemMenuDeferred(ContextMenuStrip menu)
+    {
+        if (menu.IsDisposed) return;
+        if (IsDisposed || Disposing || !IsHandleCreated)
+        {
+            menu.Dispose();
+            return;
+        }
+
+        try
+        {
+            BeginInvoke(() =>
+            {
+                if (!menu.IsDisposed) menu.Dispose();
+            });
+        }
+        catch (ObjectDisposedException) { if (!menu.IsDisposed) menu.Dispose(); }
+        catch (InvalidOperationException) { if (!menu.IsDisposed) menu.Dispose(); }
     }
 
     private static void OpenPath(string path)
