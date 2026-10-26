@@ -1,8 +1,6 @@
 // 功能：以不可見鍵盤輸入宿主支援便籤與代辦原地編輯，畫面文字仍由原本的分層視窗繪製。
 // 使用：雙擊內容後接收輸入；Enter 確認、Esc 取消，便籤本文以 Shift+Enter 換行，失去焦點即取消。
-// 設定：固定桌面物件的輸入宿主保持在一般視窗後方；懸浮物件才使用置頂層級，且不建立額外捲動列。
-
-using System.Runtime.InteropServices;
+// 設定：只有 2x2 透明輸入宿主取得鍵盤焦點；可見便籤維持原本桌面／懸浮層級，且不建立額外捲動列。
 
 namespace DesktopListTool;
 
@@ -11,6 +9,8 @@ internal sealed class InlineTextEditor : Form
     private static readonly Color TransparentEditorColor = Color.FromArgb(255, 255, 0, 255);
     private readonly TextBox _editor;
     private readonly bool _multiline;
+    private int _focusAttempts;
+    private bool _focusAcquired;
     private bool _finished;
     public event Action<string>? Committed;
     public event Action? Canceled;
@@ -31,13 +31,21 @@ internal sealed class InlineTextEditor : Form
         _editor.TextChanged += (_, _) => PublishPreview();
         _editor.KeyUp += (_, e) => { if (e.KeyCode is Keys.Left or Keys.Right or Keys.Up or Keys.Down or Keys.Home or Keys.End or Keys.PageUp or Keys.PageDown) PublishPreview(); };
         Controls.Add(_editor);
-        Shown += (_, _) =>
-        {
-            _editor.Focus(); _editor.SelectionStart = _editor.TextLength; _editor.SelectionLength = 0;
-            if (!floating) SetWindowPos(Handle, new IntPtr(1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010);
-        };
-        Deactivate += (_, _) => Cancel();
+        Shown += (_, _) => BeginInvoke(AcquireKeyboardFocus);
+        Deactivate += (_, _) => { if (_focusAcquired) Cancel(); };
         FormClosed += (_, _) => { if (!_finished) Cancel(); };
+    }
+
+    private void AcquireKeyboardFocus()
+    {
+        if (_finished || IsDisposed || Disposing) return;
+        _editor.SelectionStart = _editor.TextLength; _editor.SelectionLength = 0;
+        _focusAcquired = KeyboardInputFocus.TryAcquire(this, _editor);
+        if (_focusAcquired) return;
+        if (++_focusAttempts < 3)
+            BeginInvoke(AcquireKeyboardFocus);
+        else
+            Cancel();
     }
 
     private void HandleKeyDown(object? sender, KeyEventArgs e)
@@ -62,6 +70,4 @@ internal sealed class InlineTextEditor : Form
     internal static bool CommitsOnKey(Keys key, bool shift, bool multiline) => key == Keys.Enter && (!multiline || !shift);
     internal static bool CancelsOnKey(Keys key) => key == Keys.Escape;
 
-    [DllImport("user32.dll")]
-    private static extern bool SetWindowPos(IntPtr window, IntPtr insertAfter, int x, int y, int width, int height, uint flags);
 }
