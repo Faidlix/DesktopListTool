@@ -16,6 +16,8 @@ internal static class NativeShellContextMenu
 
     static NativeShellContextMenu() => Application.ApplicationExit += (_, _) => StopActiveMenuProcess();
 
+    public static void DismissActiveMenu() => StopActiveMenuProcess();
+
     internal static bool ProbeIsolated(string path)
     {
         var executable = Environment.ProcessPath;

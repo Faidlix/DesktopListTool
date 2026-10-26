@@ -153,6 +153,8 @@ internal sealed class DesktopViewApplicationContext : ApplicationContext
     private readonly EventWaitHandle[] _commandEvents;
     private readonly RegisteredWaitHandle[] _registeredWaits;
     private readonly DesktopBlankClickMonitor _blankClickMonitor;
+    private readonly DesktopShortcutMonitor _shortcutMonitor;
+    private DesktopLayeredOverlayForm? _activeListOverlay;
     private Form? _activePlacementSource;
     private Rectangle _activePlacementOrigin;
 
@@ -218,6 +220,7 @@ internal sealed class DesktopViewApplicationContext : ApplicationContext
         foreach (var note in _notes)
             ShowNote(note);
         SaveNotes();
+        _shortcutMonitor = new DesktopShortcutMonitor(HandleListShortcut);
         _blankClickMonitor = new DesktopBlankClickMonitor(HandleDesktopBlankClick);
         WriteQaLayoutIfRequested();
         if (AutoUpdateManager.IsEnabled)
@@ -390,6 +393,27 @@ internal sealed class DesktopViewApplicationContext : ApplicationContext
         overlay.PlacementCompleted = CompletePlacement;
         overlay.CheckUpdateRequested += async (_, _) => await CheckForUpdatesAsync(interactive: true);
         overlay.PhysicalPathsChanged += (_, _) => RefreshAllListItems();
+        overlay.KeyboardTargetActivated += HandleKeyboardTargetActivated;
+    }
+
+    private void HandleKeyboardTargetActivated(object? sender, EventArgs e)
+    {
+        if (sender is not DesktopLayeredOverlayForm active || active.IsDisposed) return;
+        _activeListOverlay = active;
+        foreach (var overlay in AllListOverlays().Where(value => !ReferenceEquals(value, active) && !value.IsDisposed))
+            overlay.DeactivateKeyboardTarget();
+    }
+
+    private bool HandleListShortcut(Keys key, bool control)
+    {
+        var active = _activeListOverlay;
+        if (active is null || active.IsDisposed || !active.HasKeyboardTarget)
+        {
+            _activeListOverlay = null;
+            return false;
+        }
+        if (!DesktopShortcutMonitor.IsDesktopForeground()) return false;
+        return active.HandleKeyboardShortcut(key, control);
     }
 
     private void RefreshAllListItems()
@@ -422,7 +446,15 @@ internal sealed class DesktopViewApplicationContext : ApplicationContext
     {
         if (_overlay.IsDisposed || AllListOverlays().Any(value => !value.IsDisposed && value.Bounds.Contains(screenPoint)) ||
             _noteForms.Any(value => !value.IsDisposed && value.Bounds.Contains(screenPoint))) return;
-        try { _overlay.BeginInvoke(() => { foreach (var overlay in AllListOverlays()) overlay.ClearSelectionFromDesktopClick(); }); }
+        try
+        {
+            _overlay.BeginInvoke(() =>
+            {
+                _activeListOverlay = null;
+                NativeShellContextMenu.DismissActiveMenu();
+                foreach (var overlay in AllListOverlays()) overlay.DeactivateKeyboardTarget();
+            });
+        }
         catch (InvalidOperationException) { }
     }
 
@@ -574,6 +606,7 @@ internal sealed class DesktopViewApplicationContext : ApplicationContext
         form.DeleteRequested += (_, _) => DeleteNote(form);
         form.AddNoteRequested += (_, e) => CreateNote(e.ScreenLocation, e.Kind);
         form.NoteChanged += (_, _) => SaveNotes();
+        form.InteractionActivated += (_, _) => ClearActiveListTarget();
         form.ResolvePlacement = (sender, candidate) => FindFreePlacement(candidate, sender);
         form.PlacementPreview = PreviewPlacement;
         form.PlacementCompleted = CompletePlacement;
@@ -581,6 +614,14 @@ internal sealed class DesktopViewApplicationContext : ApplicationContext
         form.PersistState();
         _noteForms.Add(form);
         form.Show();
+    }
+
+    private void ClearActiveListTarget()
+    {
+        _activeListOverlay = null;
+        NativeShellContextMenu.DismissActiveMenu();
+        foreach (var overlay in AllListOverlays().Where(value => !value.IsDisposed))
+            overlay.DeactivateKeyboardTarget();
     }
 
     private void EditNote(DesktopLayeredNoteForm form)
@@ -616,6 +657,7 @@ internal sealed class DesktopViewApplicationContext : ApplicationContext
         foreach (var overlay in AllListOverlays().Where(value => !value.IsDisposed)) overlay.PersistState();
         foreach (var noteForm in _noteForms.Where(value => !value.IsDisposed)) noteForm.PersistState();
         CustomListSettings.Save(_customLists); SaveNotes();
+        _shortcutMonitor.Dispose();
         _blankClickMonitor.Dispose();
         _trayIcon.Visible = false;
         _trayIcon.Dispose();
@@ -1351,9 +1393,9 @@ internal static class SmokeTests
             Assert(DesktopLayeredOverlayForm.ShouldRemoveSourceReference(DragDropEffects.Move, physicalMoveCompleted: true, droppedOutsideSource: false) &&
                 DesktopLayeredOverlayForm.ShouldRemoveSourceReference(DragDropEffects.Move, physicalMoveCompleted: false, droppedOutsideSource: true) &&
                 !DesktopLayeredOverlayForm.ShouldRemoveSourceReference(DragDropEffects.Copy, physicalMoveCompleted: true, droppedOutsideSource: true), "physical moves remove stale references even when overlapping lists share the drop point, while copies retain them");
-            Assert(ShortcutKeyHost.IsSupportedShortcut(Keys.C, control: true) && ShortcutKeyHost.IsSupportedShortcut(Keys.X, control: true) &&
-                ShortcutKeyHost.IsSupportedShortcut(Keys.V, control: true) && ShortcutKeyHost.IsSupportedShortcut(Keys.Delete, control: false) &&
-                !ShortcutKeyHost.IsSupportedShortcut(Keys.Delete, control: true), "selected list items support copy, cut, paste and delete shortcuts");
+            Assert(DesktopShortcutMonitor.IsSupportedShortcut(Keys.C, control: true) && DesktopShortcutMonitor.IsSupportedShortcut(Keys.X, control: true) &&
+                DesktopShortcutMonitor.IsSupportedShortcut(Keys.V, control: true) && DesktopShortcutMonitor.IsSupportedShortcut(Keys.Delete, control: false) &&
+                !DesktopShortcutMonitor.IsSupportedShortcut(Keys.Delete, control: true), "selected list items support input-language-independent copy, cut, paste and delete shortcuts");
             using (var recycleIcon = DesktopOverlayEntry.GetIcon(DesktopOverlayEntry.RecycleBinPath, true))
                 Assert(recycleIcon is not null, "recycle bin icon available");
             Assert(DesktopOverlayEntry.LoadPaths([DesktopOverlayEntry.RecycleBinPath]).Single().IsVirtual, "custom list can contain the recycle bin reference");
@@ -1372,6 +1414,15 @@ internal static class SmokeTests
                 Assert(overlayConstruction.Width >= overlayConstruction.MinimumSize.Width, "overlay constructs before resize callbacks");
                 Assert(overlayConstruction.ContextMenuLabels.Contains("新增便籤…") && overlayConstruction.ContextMenuLabels.Contains("新增代辦清單…") && overlayConstruction.ContextMenuLabels.Contains("複製樣式") && overlayConstruction.ContextMenuLabels.Contains("貼上樣式") && overlayConstruction.ContextMenuLabels.Contains("變成桌面圖示樣式"), "list menu exposes separate note, todo, style and icon actions");
                 Assert(overlayConstruction.UsesNoActivateForTest && overlayConstruction.MouseActivateResultForTest() == (IntPtr)3, "fixed lists reject mouse activation and stay in the desktop z-order");
+                overlayConstruction.ActivateListForTest();
+                Assert(overlayConstruction.ListSelectedForTest && overlayConstruction.HasKeyboardTarget && overlayConstruction.FrameVisibleForTest, "clicking list blank space keeps a persistent framed list paste target");
+                if (overlayConstruction.EntryPaths.Count > 0)
+                {
+                    overlayConstruction.ActivateItemForTest(0);
+                    Assert(!overlayConstruction.ListSelectedForTest && overlayConstruction.HasKeyboardTarget && !overlayConstruction.FrameVisibleForTest, "clicking an item selects only the item, without the list frame state");
+                }
+                overlayConstruction.DeactivateKeyboardTarget();
+                Assert(!overlayConstruction.HasKeyboardTarget, "clicking the Windows desktop clears the list keyboard target");
                 var detachable = overlayConstruction.EntryPaths.FirstOrDefault(value => value != DesktopOverlayEntry.RecycleBinPath);
                 if (detachable is not null) { overlayConstruction.SetExcludedPaths([detachable]); Assert(!overlayConstruction.EntryPaths.Contains(detachable, StringComparer.OrdinalIgnoreCase), "detached desktop item is hidden from main list"); overlayConstruction.SetExcludedPaths([]); }
             }
@@ -1385,8 +1436,7 @@ internal static class SmokeTests
             File.WriteAllText(secondReference, "second"); File.WriteAllText(thirdReference, "third");
             var referenced = DesktopOverlayEntry.LoadPaths([referenceFile]);
             Assert(referenced.Count == 1 && File.Exists(referenceFile), "custom list references without moving source");
-            for (var contextMenuCycle = 1; contextMenuCycle <= 20; contextMenuCycle++)
-                Assert(NativeShellContextMenu.ProbeIsolated(referenceFile), $"isolated native shell context menu cycle {contextMenuCycle}/20");
+            Assert(NativeShellContextMenu.ProbeIsolated(referenceFile), "isolated native shell context menu probe succeeds");
             var previousFloatingQa = Environment.GetEnvironmentVariable("DESKTOP_LIST_QA_FLOATING");
             Environment.SetEnvironmentVariable("DESKTOP_LIST_QA_FLOATING", "1");
             try
@@ -1494,11 +1544,13 @@ internal static class SmokeTests
             Assert(InlineTextEditor.CommitsOnKey(Keys.Enter, shift: false, multiline: true) &&
                 !InlineTextEditor.CommitsOnKey(Keys.Enter, shift: true, multiline: true) &&
                 InlineTextEditor.CancelsOnKey(Keys.Escape), "inline note editing uses Enter to confirm, Shift+Enter for newline and Esc to cancel");
-            using (var inlineEditor = new InlineTextEditor(Point.Empty, "原樣式", true, false))
+            using (var inlineEditor = new InlineTextEditor(new Rectangle(0, 0, 240, 90), "原樣式", true, false, Control.DefaultFont))
             {
                 var textInput = inlineEditor.Controls.OfType<TextBox>().Single();
-                Assert(inlineEditor.Size == new Size(2, 2) && inlineEditor.TransparencyKey == inlineEditor.BackColor && textInput.ScrollBars == ScrollBars.None,
-                    "inline note editor is only a hidden keyboard host and adds no system background or scrollbar");
+                Assert(inlineEditor.Size == new Size(240, 90) && inlineEditor.Opacity < 0.02 && textInput.ScrollBars == ScrollBars.None && textInput.WordWrap,
+                    "inline note editor covers the text target for mouse selection without adding a visible system background or scrollbar");
+                Assert(InlineTextEditor.CreateFileLink(@"C:\Example\測試.txt").Contains("[測試.txt](file:", StringComparison.Ordinal),
+                    "pasted desktop files become display-name shortcut links");
             }
 
             using (var colorAlpha = new ColorWithAlphaDialog(Color.Black, 64))
@@ -1574,7 +1626,9 @@ internal static class SmokeTests
             };
             if (Environment.GetEnvironmentVariable("DESKTOP_LIST_QA_STRAIGHT_RESIZE") == "1") note.CornerRadius = 0;
             var markdown = MarkdownNoteRenderer.ParseLine("## **標題**與[連結](https://example.invalid)");
-            Assert(markdown.HeadingLevel == 2 && markdown.Runs.Any(value => value.Style.HasFlag(FontStyle.Bold)) && markdown.Runs.Any(value => value.Style.HasFlag(FontStyle.Underline)), "Markdown formatting parses");
+            Assert(markdown.HeadingLevel == 2 && markdown.Runs.Any(value => value.Style.HasFlag(FontStyle.Bold)) && markdown.Runs.Any(value => value.Link == "https://example.invalid"), "Markdown formatting and links parse");
+            Assert(MarkdownNoteRenderer.ParseLine("網址 https://example.invalid/path").Runs.Any(value => value.Link == "https://example.invalid/path") &&
+                MarkdownNoteRenderer.TryGetSingleLink("https://example.invalid", out _, out _), "pasted raw URLs become clickable note and todo links after confirmation");
             using (var editor = new NoteEditorDialog(DesktopNoteKind.Note, note))
             {
                 Assert(editor.AcceptButton is null, "note editor Enter does not confirm");

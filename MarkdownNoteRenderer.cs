@@ -6,7 +6,7 @@ using System.Text.RegularExpressions;
 
 namespace DesktopListTool;
 
-internal sealed record MarkdownRun(string Text, FontStyle Style, bool IsCode = false);
+internal sealed record MarkdownRun(string Text, FontStyle Style, bool IsCode = false, string? Link = null);
 internal sealed record MarkdownLine(IReadOnlyList<MarkdownRun> Runs, int HeadingLevel = 0, string Prefix = "", bool? Checked = null);
 
 internal static partial class MarkdownNoteRenderer
@@ -44,7 +44,7 @@ internal static partial class MarkdownNoteRenderer
                 TryDelimited(text, ref i, "~~", FontStyle.Strikeout, result) || TryDelimited(text, ref i, "*", FontStyle.Italic, result) ||
                 TryDelimited(text, ref i, "_", FontStyle.Italic, result) || TryCode(text, ref i, result) || TryLink(text, ref i, result)) continue;
             var next = FindNextMarker(text, i + 1);
-            result.Add(new MarkdownRun(text[i..next], FontStyle.Regular));
+            AppendPlainText(text[i..next], result);
             i = next;
         }
         return result.Count == 0 ? [new MarkdownRun("", FontStyle.Regular)] : result;
@@ -67,7 +67,40 @@ internal static partial class MarkdownNoteRenderer
     {
         if (text[index] != '[') return false; var close = text.IndexOf("](", index, StringComparison.Ordinal); if (close < 0) return false;
         var end = text.IndexOf(')', close + 2); if (end < 0) return false;
-        result.Add(new MarkdownRun(text.Substring(index + 1, close - index - 1), FontStyle.Underline)); index = end + 1; return true;
+        var target = text.Substring(close + 2, end - close - 2);
+        result.Add(new MarkdownRun(text.Substring(index + 1, close - index - 1), FontStyle.Underline, Link: target)); index = end + 1; return true;
+    }
+
+    private static void AppendPlainText(string text, List<MarkdownRun> result)
+    {
+        var offset = 0;
+        foreach (Match match in UrlRegex().Matches(text))
+        {
+            if (match.Index > offset) result.Add(new MarkdownRun(text[offset..match.Index], FontStyle.Regular));
+            result.Add(new MarkdownRun(match.Value, FontStyle.Underline, Link: match.Value));
+            offset = match.Index + match.Length;
+        }
+        if (offset < text.Length) result.Add(new MarkdownRun(text[offset..], FontStyle.Regular));
+    }
+
+    public static bool TryGetSingleLink(string source, out string display, out string target)
+    {
+        var markdown = SingleLinkRegex().Match(source.Trim());
+        if (markdown.Success)
+        {
+            display = markdown.Groups[1].Value;
+            target = markdown.Groups[2].Value;
+            return true;
+        }
+        var value = source.Trim();
+        if (Uri.TryCreate(value, UriKind.Absolute, out var uri) && uri.Scheme is "http" or "https")
+        {
+            display = value;
+            target = value;
+            return true;
+        }
+        display = target = "";
+        return false;
     }
     private static int FindNextMarker(string text, int start)
     {
@@ -79,4 +112,8 @@ internal static partial class MarkdownNoteRenderer
     private static partial Regex TaskRegex();
     [GeneratedRegex(@"^(\d+)\.\s+(.*)$")]
     private static partial Regex OrderedRegex();
+    [GeneratedRegex(@"https?://[^\s<>\]]+", RegexOptions.IgnoreCase)]
+    private static partial Regex UrlRegex();
+    [GeneratedRegex(@"^\[([^\]]+)\]\((.+)\)$")]
+    private static partial Regex SingleLinkRegex();
 }

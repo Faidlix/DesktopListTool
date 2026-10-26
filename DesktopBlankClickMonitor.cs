@@ -1,4 +1,4 @@
-// 功能：監看桌面空白處左鍵點擊，通知所有清單清除目前選取項目。
+// 功能：監看桌面空白處左右鍵點擊，通知所有清單清除作用中狀態並關閉項目選單。
 // 使用：DesktopViewApplicationContext 建立後傳入回呼，結束程式時 Dispose；不攔截或修改滑鼠事件。
 // 設定：只處理 Progman／WorkerW／桌面 Shell 視窗，不影響其他應用程式。
 
@@ -9,18 +9,18 @@ namespace DesktopListTool;
 
 internal sealed class DesktopBlankClickMonitor : IDisposable
 {
-    private const int WhMouseLl = 14, WmLButtonDown = 0x0201;
+    private const int WhMouseLl = 14, WmLButtonDown = 0x0201, WmRButtonDown = 0x0204;
     private readonly HookProc _callback;
     private readonly Action<Point> _clicked;
     private IntPtr _hook;
     public DesktopBlankClickMonitor(Action<Point> clicked)
     {
         _clicked = clicked; _callback = HookCallback;
-        _hook = SetWindowsHookEx(WhMouseLl, _callback, IntPtr.Zero, 0);
+        _hook = SetWindowsHookEx(WhMouseLl, _callback, GetModuleHandle(null), 0);
     }
     private IntPtr HookCallback(int code, IntPtr wParam, IntPtr lParam)
     {
-        if (code >= 0 && wParam == (IntPtr)WmLButtonDown)
+        if (code >= 0 && (wParam == (IntPtr)WmLButtonDown || wParam == (IntPtr)WmRButtonDown))
         {
             var data = Marshal.PtrToStructure<MouseHookData>(lParam);
             if (IsDesktopSurface(data.Point)) _clicked(new Point(data.Point.X, data.Point.Y));
@@ -48,4 +48,5 @@ internal sealed class DesktopBlankClickMonitor : IDisposable
     [DllImport("user32.dll")] private static extern IntPtr WindowFromPoint(NativePoint point);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassName(IntPtr window, StringBuilder name, int maximum);
     [DllImport("user32.dll")] private static extern IntPtr GetParent(IntPtr window);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] private static extern IntPtr GetModuleHandle(string? moduleName);
 }

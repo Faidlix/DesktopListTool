@@ -32,6 +32,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
     private int _scrollOffset;
     private int _hoveredIndex = -1;
     private int _selectedIndex = -1;
+    private bool _listSelected;
     private bool _frameVisible;
     private OverlayResizeCorner _resizeHoverCorner;
     private Color _backgroundColor;
@@ -55,7 +56,6 @@ internal sealed class DesktopLayeredOverlayForm : Form
     private bool _dragCancelled;
     private bool _dropIsCopy;
     private Point _lastDragClientPoint;
-    private ShortcutKeyHost? _shortcutKeyHost;
     private ContextMenuStrip? _safeItemMenu;
 
     public event EventHandler? AddFolderRequested;
@@ -66,6 +66,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
     public event EventHandler? PlacementChanged;
     public event EventHandler? CheckUpdateRequested;
     public event EventHandler? PhysicalPathsChanged;
+    public event EventHandler? KeyboardTargetActivated;
     internal Action<Form, Rectangle>? PlacementPreview;
     internal Action<Form>? PlacementCompleted;
     public string? FolderPath => _folderPath;
@@ -77,6 +78,11 @@ internal sealed class DesktopLayeredOverlayForm : Form
     internal bool UsesNoActivateForTest => (CreateParams.ExStyle & 0x08000000) != 0;
     internal IntPtr MouseActivateResultForTest() { var message = Message.Create(Handle, 0x0021, IntPtr.Zero, IntPtr.Zero); WndProc(ref message); return message.Result; }
     internal bool OwnsScreenPointForTest(Point screenPoint) => WindowFromPoint(screenPoint) == Handle;
+    internal bool HasKeyboardTarget => _listSelected || _selectedIndex >= 0;
+    internal bool ListSelectedForTest => _listSelected;
+    internal bool FrameVisibleForTest => _frameVisible;
+    internal void ActivateListForTest() => ActivateList();
+    internal void ActivateItemForTest(int index) => ActivateItem(index);
     internal void SetResizeCornerForTest(OverlayResizeCorner corner) { _resizeHoverCorner = corner; _frameVisible = true; RenderLayer(); }
     internal Func<DesktopLayeredOverlayForm, Rectangle, Rectangle>? ResolvePlacement;
     private string? SettingsIdentity => _customList is null ? _folderPath : $"custom:{_customList.Id:N}";
@@ -214,6 +220,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
 
     public void RevealFrame()
     {
+        if (_selectedIndex >= 0 && !_listSelected) return;
         if (_frameVisible)
             return;
         _frameVisible = true;
@@ -373,9 +380,9 @@ internal sealed class DesktopLayeredOverlayForm : Form
         {
             _lastContextMenuScreenPoint = PointToScreen(e.Location);
             if (index >= 0)
-                SelectIndex(index);
+                ActivateItem(index);
             else
-                ClearSelection();
+                ActivateList();
             if (index >= 0)
             {
                 var path = _entries[index].Path;
@@ -389,14 +396,14 @@ internal sealed class DesktopLayeredOverlayForm : Form
             return;
         if (index >= 0)
         {
-            SelectIndex(index);
+            ActivateItem(index);
             _dragCandidateIndex = index;
             _dragStart = e.Location;
             return;
         }
 
         _dragCandidateIndex = -1;
-        ClearSelection();
+        ActivateList();
         ReleaseCapture();
         SendMessage(Handle, 0x00A1, (IntPtr)2, IntPtr.Zero);
     }
@@ -404,9 +411,6 @@ internal sealed class DesktopLayeredOverlayForm : Form
     private void HandleMouseUp(object? sender, MouseEventArgs e)
     {
         if (e.Button != MouseButtons.Left) return;
-        var index = GetEntryIndexAt(e.Location);
-        if (_dragCandidateIndex >= 0 && index == _dragCandidateIndex)
-            StartShortcutKeyHost(PointToScreen(e.Location));
         _dragCandidateIndex = -1;
     }
 
@@ -415,7 +419,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
         var index = GetEntryIndexAt(e.Location);
         if (e.Button == MouseButtons.Left && index >= 0)
         {
-            SelectIndex(index);
+            ActivateItem(index);
             OpenSelected();
         }
     }
@@ -445,21 +449,45 @@ internal sealed class DesktopLayeredOverlayForm : Form
 
     private void SelectIndex(int index)
     {
-        if (_selectedIndex == index)
+        if (_selectedIndex == index && !_listSelected)
             return;
+        _listSelected = false;
         _selectedIndex = index;
+        _frameVisible = false;
+        _resizeHoverCorner = OverlayResizeCorner.None;
         RenderLayer();
     }
 
-    private void ClearSelection()
+    private void ActivateItem(int index)
     {
-        CloseShortcutKeyHost();
-        if (_selectedIndex < 0) return;
-        _selectedIndex = -1;
-        RenderLayer();
+        DismissContextMenus();
+        SelectIndex(index);
+        KeyboardTargetActivated?.Invoke(this, EventArgs.Empty);
     }
 
-    public void ClearSelectionFromDesktopClick() => ClearSelection();
+    private void ActivateList()
+    {
+        DismissContextMenus();
+        var changed = !_listSelected || _selectedIndex >= 0 || !_frameVisible;
+        _selectedIndex = -1;
+        _listSelected = true;
+        _frameVisible = true;
+        if (changed) RenderLayer();
+        KeyboardTargetActivated?.Invoke(this, EventArgs.Empty);
+    }
+
+    internal void DeactivateKeyboardTarget(bool dismissMenus = true)
+    {
+        var changed = _listSelected || _selectedIndex >= 0 || _frameVisible;
+        _listSelected = false;
+        _selectedIndex = -1;
+        _frameVisible = false;
+        _resizeHoverCorner = OverlayResizeCorner.None;
+        if (dismissMenus) DismissContextMenus();
+        if (changed) RenderLayer();
+    }
+
+    public void ClearSelectionFromDesktopClick() => DeactivateKeyboardTarget();
 
     private void SetHoveredIndex(int index)
     {
@@ -538,7 +566,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
 
     private void UpdateFrameVisibility()
     {
-        var visible = Rectangle.Inflate(Bounds, 18, 18).Contains(Cursor.Position) || _menu?.Visible == true;
+        var visible = _listSelected || (_selectedIndex < 0 && (Rectangle.Inflate(Bounds, 18, 18).Contains(Cursor.Position) || _menu?.Visible == true || _safeItemMenu?.Visible == true));
         var corner = visible ? OverlayStyleRendering.GetResizeCorner(PointToClient(Cursor.Position), ClientSize) : OverlayResizeCorner.None;
         if (visible == _frameVisible && corner == _resizeHoverCorner)
             return;
@@ -1064,32 +1092,22 @@ internal sealed class DesktopLayeredOverlayForm : Form
         }
     }
 
-    private void StartShortcutKeyHost(Point screenPoint)
+    internal bool HandleKeyboardShortcut(Keys key, bool control)
     {
-        if (!IsHandleCreated || IsDisposed) return;
-        BeginInvoke(() =>
-        {
-            _shortcutKeyHost?.Close(); _shortcutKeyHost?.Dispose();
-            var host = new ShortcutKeyHost(screenPoint, _isFloating); _shortcutKeyHost = host;
-            host.ShortcutPressed += (key, control) =>
-            {
-                if (control && key == Keys.C) CopySelectedToClipboard(cut: false);
-                else if (control && key == Keys.X) CopySelectedToClipboard(cut: true);
-                else if (control && key == Keys.V) PasteClipboardItems();
-                else if (key == Keys.Delete) DeleteSelectedToRecycleBin();
-            };
-            host.FormClosed += (_, _) => { if (ReferenceEquals(_shortcutKeyHost, host)) _shortcutKeyHost = null; host.Dispose(); };
-            host.Show();
-        });
+        if (!HasKeyboardTarget) return false;
+        if (control && key == Keys.C && SelectedEntry is { IsVirtual: false }) CopySelectedToClipboard(cut: false);
+        else if (control && key == Keys.X && SelectedEntry is { IsVirtual: false }) CopySelectedToClipboard(cut: true);
+        else if (control && key == Keys.V) PasteClipboardItems();
+        else if (!control && key == Keys.Delete && SelectedEntry is { IsVirtual: false }) DeleteSelectedToRecycleBin();
+        else return false;
+        return true;
     }
 
-    private void CloseShortcutKeyHost()
+    internal void DismissContextMenus()
     {
-        var host = _shortcutKeyHost;
-        _shortcutKeyHost = null;
-        if (host is null) return;
-        host.Close();
-        host.Dispose();
+        _menu?.Close();
+        _safeItemMenu?.Close();
+        NativeShellContextMenu.DismissActiveMenu();
     }
 
     private void BeginItemDrag(int index)
@@ -1708,7 +1726,6 @@ internal sealed class DesktopLayeredOverlayForm : Form
             _publicWatcher?.Dispose();
             _menu?.Dispose();
             _safeItemMenu?.Dispose();
-            CloseShortcutKeyHost();
             _itemFont?.Dispose();
             SystemEvents.UserPreferenceChanged -= HandleUserPreferenceChanged;
             foreach (var entry in _entries)
