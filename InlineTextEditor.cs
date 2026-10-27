@@ -74,7 +74,30 @@ internal sealed class InlineTextEditor : Form
         _editor.Text,
         Math.Clamp(_editor.SelectionStart, 0, _editor.TextLength),
         Math.Clamp(_editor.SelectionLength, 0, _editor.TextLength),
-        GetSelectionRectangles()));
+        GetSelectionRectangles(),
+        GetVisibleLines(),
+        _editor.GetPositionFromCharIndex(Math.Clamp(_editor.SelectionStart, 0, _editor.TextLength)),
+        Math.Max(18, _editor.Font.Height + 2)));
+
+    private IReadOnlyList<InlineEditLine> GetVisibleLines()
+    {
+        var lines = new List<InlineEditLine>();
+        var firstCharacter = Math.Clamp(_editor.GetCharIndexFromPosition(Point.Empty), 0, _editor.TextLength);
+        var firstLine = Math.Max(0, _editor.GetLineFromCharIndex(firstCharacter));
+        var lineCount = Math.Max(1, _editor.GetLineFromCharIndex(_editor.TextLength) + 1);
+        for (var line = firstLine; line < lineCount; line++)
+        {
+            var start = _editor.GetFirstCharIndexFromLine(line);
+            if (start < 0 || start > _editor.TextLength) break;
+            var next = line + 1 < lineCount ? _editor.GetFirstCharIndexFromLine(line + 1) : _editor.TextLength;
+            if (next < start) next = _editor.TextLength;
+            var value = _editor.Text[start..Math.Clamp(next, start, _editor.TextLength)].TrimEnd('\r', '\n');
+            var location = _editor.GetPositionFromCharIndex(start);
+            if (location.Y > _editor.ClientSize.Height) break;
+            lines.Add(new InlineEditLine(value, location));
+        }
+        return lines;
+    }
 
     private IReadOnlyList<Rectangle> GetSelectionRectangles()
     {
@@ -145,4 +168,6 @@ internal sealed class InlineTextEditor : Form
 
 }
 
-internal sealed record InlineEditSnapshot(string Text, int SelectionStart, int SelectionLength, IReadOnlyList<Rectangle> SelectionRectangles);
+internal sealed record InlineEditLine(string Text, Point Location);
+internal sealed record InlineEditSnapshot(string Text, int SelectionStart, int SelectionLength,
+    IReadOnlyList<Rectangle> SelectionRectangles, IReadOnlyList<InlineEditLine> VisibleLines, Point CaretLocation, int LineHeight);

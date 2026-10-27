@@ -220,7 +220,7 @@ internal sealed class DesktopViewApplicationContext : ApplicationContext
         foreach (var note in _notes)
             ShowNote(note);
         SaveNotes();
-        _shortcutMonitor = new DesktopShortcutMonitor(HandleListShortcut);
+        _shortcutMonitor = new DesktopShortcutMonitor(HandleListShortcut, ClearActiveListTarget);
         _blankClickMonitor = new DesktopBlankClickMonitor(HandleDesktopBlankClick);
         WriteQaLayoutIfRequested();
         if (AutoUpdateManager.IsEnabled)
@@ -412,7 +412,6 @@ internal sealed class DesktopViewApplicationContext : ApplicationContext
             _activeListOverlay = null;
             return false;
         }
-        if (!DesktopShortcutMonitor.IsDesktopForeground()) return false;
         return active.HandleKeyboardShortcut(key, control);
     }
 
@@ -1568,6 +1567,8 @@ internal static class SmokeTests
                 Directory.CreateDirectory(source);
                 var file = Path.Combine(source, "drag.txt");
                 File.WriteAllText(file, "drag-copy-move");
+                var sameFolderCopies = DesktopLayeredOverlayForm.DuplicatePaths([file], source);
+                Assert(sameFolderCopies.Count == 1 && File.Exists(sameFolderCopies[0]) && File.Exists(file) && Path.GetFileName(sameFolderCopies[0]).Contains("複製"), "ctrl drag on the same list creates a uniquely named physical copy");
                 Assert(DesktopLayeredOverlayForm.TransferPaths([file], copyTarget, copy: true), "copy reports a physical change");
                 Assert(File.Exists(Path.Combine(copyTarget, "drag.txt")) && File.Exists(file), "ctrl drag copies file");
                 Assert(DesktopLayeredOverlayForm.TransferPaths([file], moveTarget, copy: false), "move reports a physical change");

@@ -1,6 +1,6 @@
-// 功能：監看桌面空白處左右鍵點擊，通知所有清單清除作用中狀態並關閉項目選單。
+// 功能：監看清單外部的左右鍵點擊，讓作用中清單及其鍵盤快捷鍵目標立即解除。
 // 使用：DesktopViewApplicationContext 建立後傳入回呼，結束程式時 Dispose；不攔截或修改滑鼠事件。
-// 設定：只處理 Progman／WorkerW／桌面 Shell 視窗，不影響其他應用程式。
+// 設定：略過 Windows 快顯選單視窗，避免在選取右鍵命令前先把選單關閉。
 
 using System.Runtime.InteropServices;
 using System.Text;
@@ -23,17 +23,17 @@ internal sealed class DesktopBlankClickMonitor : IDisposable
         if (code >= 0 && (wParam == (IntPtr)WmLButtonDown || wParam == (IntPtr)WmRButtonDown))
         {
             var data = Marshal.PtrToStructure<MouseHookData>(lParam);
-            if (IsDesktopSurface(data.Point)) _clicked(new Point(data.Point.X, data.Point.Y));
+            if (!IsPopupMenuSurface(data.Point)) _clicked(new Point(data.Point.X, data.Point.Y));
         }
         return CallNextHookEx(_hook, code, wParam, lParam);
     }
-    private static bool IsDesktopSurface(NativePoint point)
+    private static bool IsPopupMenuSurface(NativePoint point)
     {
         var window = WindowFromPoint(point); var name = new StringBuilder(128);
         while (window != IntPtr.Zero)
         {
             name.Clear(); GetClassName(window, name, name.Capacity);
-            if (name.ToString() is "Progman" or "WorkerW" or "SHELLDLL_DefView" or "SysListView32") return true;
+            if (name.ToString() == "#32768") return true;
             window = GetParent(window);
         }
         return false;

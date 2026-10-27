@@ -31,6 +31,10 @@ internal sealed class DesktopLayeredNoteForm : Form
     private int _editingCaretIndex;
     private int _editingSelectionLength;
     private readonly List<Rectangle> _editingSelectionBounds = [];
+    private readonly List<InlineEditLine> _editingVisibleLines = [];
+    private Point _editingCaretPoint;
+    private int _editingLineHeight;
+    private bool _hasInlineSnapshot;
     private readonly List<(RectangleF Bounds, string Target)> _linkBounds = [];
     private Rectangle _bodyTextBounds;
     private bool _frameVisible;
@@ -330,7 +334,12 @@ internal sealed class DesktopLayeredNoteForm : Form
         _lastDistributionExtra = 0;
         var bodyTop = y;
         var bodyText = _editingBody ? _editingText ?? "" : _data.Text;
-        if (!IsTodo && !string.IsNullOrWhiteSpace(bodyText))
+        if (!IsTodo && _editingBody && _hasInlineSnapshot)
+        {
+            DrawInlineSnapshot(graphics, _font);
+            y = safe.Bottom;
+        }
+        else if (!IsTodo && !string.IsNullOrWhiteSpace(bodyText))
         {
             using var textBrush = new SolidBrush(_style.TextColor);
             using var shadowBrush = new SolidBrush(Color.FromArgb(210, 0, 0, 0));
@@ -384,14 +393,17 @@ internal sealed class DesktopLayeredNoteForm : Form
                 linkFont = new Font(font, font.Style | FontStyle.Underline);
                 drawFont = linkFont;
             }
-            DrawSimpleText(graphics, displayText, drawFont, itemBounds, shadowBrush, textBrush);
+            if (_editingChecklistItemId == item.Id && _hasInlineSnapshot)
+                DrawInlineSnapshot(graphics, drawFont);
+            else
+                DrawSimpleText(graphics, displayText, drawFont, itemBounds, shadowBrush, textBrush);
             if (linkTarget is not null)
             {
                 var linkWidth = Math.Min(itemBounds.Width, graphics.MeasureString(displayText, drawFont, PointF.Empty, StringFormat.GenericTypographic).Width);
                 _linkBounds.Add((new RectangleF(itemBounds.Location, new SizeF(linkWidth, Math.Max(drawFont.Height, itemBounds.Height))), linkTarget));
             }
             linkFont?.Dispose();
-            if (_editingChecklistItemId == item.Id && _editingSelectionLength == 0) DrawChecklistCaret(graphics, itemText[..Math.Clamp(_editingCaretIndex, 0, itemText.Length)], font, itemBounds);
+            if (_editingChecklistItemId == item.Id && _editingSelectionLength == 0 && !_hasInlineSnapshot) DrawChecklistCaret(graphics, itemText[..Math.Clamp(_editingCaretIndex, 0, itemText.Length)], font, itemBounds);
             _checkBounds.Add((item, row));
             _checkTextBounds[item.Id] = Rectangle.Ceiling(itemBounds);
             y += itemStep;
@@ -528,6 +540,21 @@ internal sealed class DesktopLayeredNoteForm : Form
         for (var i = 0; i < text.Length; i++) { var value = text[i].ToString(); graphics.DrawString(value, font, shadow, cursor + 1, bounds.Top + 1, StringFormat.GenericTypographic); graphics.DrawString(value, font, foreground, cursor, bounds.Top, StringFormat.GenericTypographic); cursor += widths[i] + extra; }
     }
 
+    private void DrawInlineSnapshot(Graphics graphics, Font font)
+    {
+        using var foreground = new SolidBrush(_style.TextColor);
+        using var shadow = new SolidBrush(Color.FromArgb(210, 0, 0, 0));
+        foreach (var line in _editingVisibleLines)
+        {
+            graphics.DrawString(line.Text, font, shadow, line.Location.X + 1, line.Location.Y + 1, StringFormat.GenericTypographic);
+            graphics.DrawString(line.Text, font, foreground, line.Location.X, line.Location.Y, StringFormat.GenericTypographic);
+        }
+        if (_editingSelectionLength != 0) return;
+        using var pen = new Pen(Color.FromArgb(235, 96, 205, 255), 2F);
+        graphics.DrawLine(pen, _editingCaretPoint.X, _editingCaretPoint.Y,
+            _editingCaretPoint.X, _editingCaretPoint.Y + Math.Max(18, _editingLineHeight));
+    }
+
     private void DrawBodyCaret(Graphics graphics, string text, Rectangle bounds, int top)
     {
         var lines = text.Replace("\r", "").Split('\n');
@@ -636,16 +663,16 @@ internal sealed class DesktopLayeredNoteForm : Form
     private void BeginInlineBodyEdit()
     {
         CloseInlineEditor();
-        _editingBody = true; _editingChecklistItemId = null; _editingText = _data.Text; _editingCaretIndex = _data.Text.Length; _editingSelectionLength = 0; _editingSelectionBounds.Clear(); RenderEditingAtEnd();
-        var local = Rectangle.Intersect(_bodyTextBounds, SafeContentBounds);
-        if (local.Width <= 0 || local.Height <= 0) local = SafeContentBounds;
+        _editingBody = true; _editingChecklistItemId = null; _editingText = _data.Text; _editingCaretIndex = _data.Text.Length; _editingSelectionLength = 0; ResetInlineSnapshot();
+        _scrollOffset = 0; RenderLayer();
+        var local = SafeContentBounds;
         var editor = new InlineTextEditor(RectangleToScreen(local), _data.Text, true, _isFloating, _font);
         _inlineEditor = editor;
         editor.PreviewChanged += snapshot =>
         {
             if (!ReferenceEquals(_inlineEditor, editor)) return;
             ApplyInlineSnapshot(snapshot, local);
-            if (snapshot.SelectionStart == snapshot.Text.Length && snapshot.SelectionLength == 0) RenderEditingAtEnd(); else RenderLayer();
+            RenderLayer();
         };
         editor.Committed += value => { if (!ReferenceEquals(_inlineEditor, editor)) return; _data.Text = value.TrimEnd(); _scrollOffset = 0; FinishInlineEdit(editor); NoteChanged?.Invoke(this, EventArgs.Empty); };
         editor.Canceled += () => { if (ReferenceEquals(_inlineEditor, editor)) FinishInlineEdit(editor); };
@@ -655,7 +682,7 @@ internal sealed class DesktopLayeredNoteForm : Form
 
     private void BeginInlineChecklistEdit(DesktopChecklistItem item, bool removeOnCancel)
     {
-        CloseInlineEditor(); _editingBody = false; _editingChecklistItemId = item.Id; _editingText = item.Text; _editingCaretIndex = item.Text.Length; _editingSelectionLength = 0; _editingSelectionBounds.Clear(); RenderLayer();
+        CloseInlineEditor(); _editingBody = false; _editingChecklistItemId = item.Id; _editingText = item.Text; _editingCaretIndex = item.Text.Length; _editingSelectionLength = 0; ResetInlineSnapshot(); RenderLayer();
         if (!_checkTextBounds.TryGetValue(item.Id, out var local)) local = new Rectangle(SafeContentBounds.Left + 30, SafeContentBounds.Top, Math.Max(80, SafeContentBounds.Width - 30), Math.Max(28, _style.LineHeight));
         var editor = new InlineTextEditor(RectangleToScreen(local), item.Text, false, _isFloating, item.Completed ? _completedFont : _font);
         _inlineEditor = editor;
@@ -669,7 +696,7 @@ internal sealed class DesktopLayeredNoteForm : Form
     private void FinishInlineEdit(InlineTextEditor editor)
     {
         if (ReferenceEquals(_inlineEditor, editor)) _inlineEditor = null;
-        _editingBody = false; _editingChecklistItemId = null; _editingText = null; _editingCaretIndex = 0; _editingSelectionLength = 0; _editingSelectionBounds.Clear(); RenderLayer();
+        _editingBody = false; _editingChecklistItemId = null; _editingText = null; _editingCaretIndex = 0; _editingSelectionLength = 0; ResetInlineSnapshot(); RenderLayer();
     }
     private void ApplyInlineSnapshot(InlineEditSnapshot snapshot, Rectangle localBounds)
     {
@@ -683,6 +710,12 @@ internal sealed class DesktopLayeredNoteForm : Form
             Math.Min(bounds.Width, Math.Max(1, localBounds.Right - localBounds.Left - bounds.Left)),
             Math.Min(bounds.Height, Math.Max(1, localBounds.Bottom - localBounds.Top - bounds.Top))))
             .Where(bounds => bounds.Width > 0 && bounds.Height > 0));
+        _editingVisibleLines.Clear();
+        _editingVisibleLines.AddRange(snapshot.VisibleLines.Select(line => new InlineEditLine(line.Text,
+            new Point(localBounds.Left + line.Location.X, localBounds.Top + line.Location.Y))));
+        _editingCaretPoint = new Point(localBounds.Left + snapshot.CaretLocation.X, localBounds.Top + snapshot.CaretLocation.Y);
+        _editingLineHeight = snapshot.LineHeight;
+        _hasInlineSnapshot = true;
     }
     private void RenderEditingAtEnd()
     {
@@ -692,7 +725,11 @@ internal sealed class DesktopLayeredNoteForm : Form
     private void CloseInlineEditor()
     {
         if (_inlineEditor is { IsDisposed: false } editor) editor.Close();
-        _inlineEditor = null; _editingBody = false; _editingChecklistItemId = null; _editingText = null; _editingCaretIndex = 0; _editingSelectionLength = 0; _editingSelectionBounds.Clear(); RenderLayer();
+        _inlineEditor = null; _editingBody = false; _editingChecklistItemId = null; _editingText = null; _editingCaretIndex = 0; _editingSelectionLength = 0; ResetInlineSnapshot(); RenderLayer();
+    }
+    private void ResetInlineSnapshot()
+    {
+        _editingSelectionBounds.Clear(); _editingVisibleLines.Clear(); _editingCaretPoint = Point.Empty; _editingLineHeight = 0; _hasInlineSnapshot = false;
     }
     private bool IsResizeCorner(Point point) => (point.X < 18 || point.X >= ClientSize.Width - 18) && (point.Y < 18 || point.Y >= ClientSize.Height - 18);
 

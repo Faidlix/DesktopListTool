@@ -1311,17 +1311,26 @@ internal sealed class DesktopLayeredOverlayForm : Form
             else if (paths.Length == 1 && e.Data!.GetDataPresent("DesktopListTool.SourcePath") &&
                      _entries.Any(item => string.Equals(item.Path, paths[0], StringComparison.OrdinalIgnoreCase)))
             {
-                var sourceIndex = _entries.FindIndex(item => string.Equals(item.Path, paths[0], StringComparison.OrdinalIgnoreCase));
-                var destination = Math.Clamp(_dropInsertIndex, 0, _entries.Count);
-                var item = _entries[sourceIndex];
-                _entries.RemoveAt(sourceIndex);
-                if (destination > sourceIndex) destination--;
-                _entries.Insert(Math.Clamp(destination, 0, _entries.Count), item);
-                _selectedIndex = _entries.IndexOf(item);
-                _sortMode = OverlaySortMode.Custom;
-                OverlayOrderSettings.SaveSort(SettingsIdentity, _sortMode, true);
-                OverlayOrderSettings.SaveCustomOrder(SettingsIdentity, _entries.Select(value => value.Path));
-                SyncCustomPaths();
+                if (e.Effect == DragDropEffects.Copy && _customList is null)
+                {
+                    DuplicatePaths(paths, _folderPath ?? Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory));
+                    PhysicalPathsChanged?.Invoke(this, EventArgs.Empty);
+                    ReloadItems();
+                }
+                else
+                {
+                    var sourceIndex = _entries.FindIndex(item => string.Equals(item.Path, paths[0], StringComparison.OrdinalIgnoreCase));
+                    var destination = Math.Clamp(_dropInsertIndex, 0, _entries.Count);
+                    var item = _entries[sourceIndex];
+                    _entries.RemoveAt(sourceIndex);
+                    if (destination > sourceIndex) destination--;
+                    _entries.Insert(Math.Clamp(destination, 0, _entries.Count), item);
+                    _selectedIndex = _entries.IndexOf(item);
+                    _sortMode = OverlaySortMode.Custom;
+                    OverlayOrderSettings.SaveSort(SettingsIdentity, _sortMode, true);
+                    OverlayOrderSettings.SaveCustomOrder(SettingsIdentity, _entries.Select(value => value.Path));
+                    SyncCustomPaths();
+                }
             }
             else if (_customList is not null)
             {
@@ -1375,6 +1384,24 @@ internal sealed class DesktopLayeredOverlayForm : Form
             changed = true;
         }
         return changed;
+    }
+
+    internal static IReadOnlyList<string> DuplicatePaths(IEnumerable<string> paths, string destinationDirectory)
+    {
+        Directory.CreateDirectory(destinationDirectory);
+        var created = new List<string>();
+        foreach (var source in paths.Where(path => File.Exists(path) || Directory.Exists(path)))
+        {
+            var name = Directory.Exists(source) ? Path.GetFileName(source.TrimEnd(Path.DirectorySeparatorChar)) : Path.GetFileNameWithoutExtension(source);
+            var extension = Directory.Exists(source) ? "" : Path.GetExtension(source);
+            var destination = Path.Combine(destinationDirectory, $"{name} - 複製{extension}");
+            for (var index = 2; File.Exists(destination) || Directory.Exists(destination); index++)
+                destination = Path.Combine(destinationDirectory, $"{name} - 複製 ({index}){extension}");
+            if (Directory.Exists(source)) CopyDirectory(source, destination);
+            else File.Copy(source, destination);
+            created.Add(destination);
+        }
+        return created;
     }
 
     private void AddReferencePaths(IEnumerable<string> paths)
