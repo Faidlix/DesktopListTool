@@ -122,6 +122,7 @@ internal sealed class DesktopLayeredNoteForm : Form
     internal bool UsesNoActivateForTest => (CreateParams.ExStyle & 0x08000000) != 0;
     internal IntPtr MouseActivateResultForTest() { var message = Message.Create(Handle, 0x0021, IntPtr.Zero, IntPtr.Zero); WndProc(ref message); return message.Result; }
     internal bool HasAddChecklistButtonForTest => !_addChecklistBounds.IsEmpty;
+    internal bool OwnsContextMenuPoint(Point screenPoint) => _menu.Visible && _menu.Bounds.Contains(screenPoint);
     internal void SetResizeCornerForTest(OverlayResizeCorner corner) { _resizeHoverCorner = corner; _frameVisible = true; RenderLayer(); }
     internal void RenderForTest() { _ = Handle; RenderLayer(); }
     internal void ScrollForTest(int delta)

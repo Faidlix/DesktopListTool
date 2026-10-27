@@ -81,6 +81,9 @@ internal sealed class DesktopLayeredOverlayForm : Form
     internal bool HasKeyboardTarget => _listSelected || _selectedIndex >= 0;
     internal bool ListSelectedForTest => _listSelected;
     internal bool FrameVisibleForTest => _frameVisible;
+    internal bool OwnsContextMenuPoint(Point screenPoint) =>
+        (_menu?.Visible == true && _menu.Bounds.Contains(screenPoint)) ||
+        (_safeItemMenu?.Visible == true && _safeItemMenu.Bounds.Contains(screenPoint));
     internal void ActivateListForTest() => ActivateList();
     internal void ActivateItemForTest(int index) => ActivateItem(index);
     internal void SetResizeCornerForTest(OverlayResizeCorner corner) { _resizeHoverCorner = corner; _frameVisible = true; RenderLayer(); }
@@ -1040,7 +1043,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
                 if (move) Clipboard.Clear();
                 return;
             }
-            TransferPaths(paths, _folderPath ?? Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), copy: !move);
+            PastePathsIntoDirectory(paths, _folderPath ?? Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory), move);
             PhysicalPathsChanged?.Invoke(this, EventArgs.Empty);
             ReloadItems();
             if (move) Clipboard.Clear();
@@ -1402,6 +1405,26 @@ internal sealed class DesktopLayeredOverlayForm : Form
             created.Add(destination);
         }
         return created;
+    }
+
+    internal static bool PastePathsIntoDirectory(IEnumerable<string> paths, string destinationDirectory, bool move)
+    {
+        var existing = paths.Where(path => File.Exists(path) || Directory.Exists(path)).ToArray();
+        if (existing.Length == 0) return false;
+        if (move) return TransferPaths(existing, destinationDirectory, copy: false);
+
+        var sameFolder = existing.Where(path => IsDirectChildOf(path, destinationDirectory)).ToArray();
+        var fromElsewhere = existing.Where(path => !IsDirectChildOf(path, destinationDirectory)).ToArray();
+        var changed = DuplicatePaths(sameFolder, destinationDirectory).Count > 0;
+        return TransferPaths(fromElsewhere, destinationDirectory, copy: true) || changed;
+    }
+
+    private static bool IsDirectChildOf(string path, string directory)
+    {
+        var source = Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var parent = Path.GetDirectoryName(source);
+        var target = Path.GetFullPath(directory).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        return string.Equals(parent, target, StringComparison.OrdinalIgnoreCase);
     }
 
     private void AddReferencePaths(IEnumerable<string> paths)

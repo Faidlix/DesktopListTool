@@ -444,7 +444,9 @@ internal sealed class DesktopViewApplicationContext : ApplicationContext
     private void HandleDesktopBlankClick(Point screenPoint)
     {
         if (_overlay.IsDisposed || AllListOverlays().Any(value => !value.IsDisposed && value.Bounds.Contains(screenPoint)) ||
-            _noteForms.Any(value => !value.IsDisposed && value.Bounds.Contains(screenPoint))) return;
+            _noteForms.Any(value => !value.IsDisposed && value.Bounds.Contains(screenPoint)) ||
+            AllListOverlays().Any(value => !value.IsDisposed && value.OwnsContextMenuPoint(screenPoint)) ||
+            _noteForms.Any(value => !value.IsDisposed && value.OwnsContextMenuPoint(screenPoint))) return;
         try
         {
             _overlay.BeginInvoke(() =>
@@ -1569,6 +1571,8 @@ internal static class SmokeTests
                 File.WriteAllText(file, "drag-copy-move");
                 var sameFolderCopies = DesktopLayeredOverlayForm.DuplicatePaths([file], source);
                 Assert(sameFolderCopies.Count == 1 && File.Exists(sameFolderCopies[0]) && File.Exists(file) && Path.GetFileName(sameFolderCopies[0]).Contains("複製"), "ctrl drag on the same list creates a uniquely named physical copy");
+                Assert(DesktopLayeredOverlayForm.PastePathsIntoDirectory([file], source, move: false) &&
+                    File.Exists(Path.Combine(source, "drag - 複製 (2).txt")), "copy and paste in the source list creates the next uniquely named copy in place");
                 Assert(DesktopLayeredOverlayForm.TransferPaths([file], copyTarget, copy: true), "copy reports a physical change");
                 Assert(File.Exists(Path.Combine(copyTarget, "drag.txt")) && File.Exists(file), "ctrl drag copies file");
                 Assert(DesktopLayeredOverlayForm.TransferPaths([file], moveTarget, copy: false), "move reports a physical change");
