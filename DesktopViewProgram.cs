@@ -160,6 +160,7 @@ internal sealed class DesktopViewApplicationContext : ApplicationContext
 
     private readonly ToolStripMenuItem _startupItem;
     private bool _checkingForUpdate;
+    private int _savingState;
 
     public DesktopViewApplicationContext(ListItemSize initialSize)
     {
@@ -222,6 +223,8 @@ internal sealed class DesktopViewApplicationContext : ApplicationContext
         SaveNotes();
         _shortcutMonitor = new DesktopShortcutMonitor(HandleListShortcut, ClearActiveListTarget);
         _blankClickMonitor = new DesktopBlankClickMonitor(HandleDesktopBlankClick);
+        Application.ApplicationExit += HandleApplicationExit;
+        SystemEvents.SessionEnding += HandleSessionEnding;
         WriteQaLayoutIfRequested();
         if (AutoUpdateManager.IsEnabled)
             _overlay.BeginInvoke(async () => { await Task.Delay(2500); await CheckForUpdatesAsync(interactive: false); });
@@ -646,6 +649,26 @@ internal sealed class DesktopViewApplicationContext : ApplicationContext
 
     private void SaveNotes() => DesktopNotesSettings.Save(_notes);
 
+    private void HandleApplicationExit(object? sender, EventArgs e) => PersistAllState(capturePlacement: true);
+
+    private void HandleSessionEnding(object sender, SessionEndingEventArgs e) => PersistAllState(capturePlacement: false);
+
+    private void PersistAllState(bool capturePlacement)
+    {
+        if (Interlocked.Exchange(ref _savingState, 1) == 1) return;
+        try
+        {
+            if (capturePlacement)
+            {
+                foreach (var overlay in AllListOverlays().Where(value => !value.IsDisposed)) overlay.PersistState();
+                foreach (var noteForm in _noteForms.Where(value => !value.IsDisposed)) noteForm.PersistState();
+            }
+            CustomListSettings.Save(_customLists);
+            SaveNotes();
+        }
+        finally { Volatile.Write(ref _savingState, 0); }
+    }
+
     private RegisteredWaitHandle RegisterCommand(EventWaitHandle commandEvent, Action action) =>
         ThreadPool.RegisterWaitForSingleObject(commandEvent, (_, _) =>
         {
@@ -655,9 +678,9 @@ internal sealed class DesktopViewApplicationContext : ApplicationContext
 
     protected override void ExitThreadCore()
     {
-        foreach (var overlay in AllListOverlays().Where(value => !value.IsDisposed)) overlay.PersistState();
-        foreach (var noteForm in _noteForms.Where(value => !value.IsDisposed)) noteForm.PersistState();
-        CustomListSettings.Save(_customLists); SaveNotes();
+        PersistAllState(capturePlacement: true);
+        Application.ApplicationExit -= HandleApplicationExit;
+        SystemEvents.SessionEnding -= HandleSessionEnding;
         _shortcutMonitor.Dispose();
         _blankClickMonitor.Dispose();
         _trayIcon.Visible = false;

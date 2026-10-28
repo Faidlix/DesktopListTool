@@ -9,15 +9,16 @@ namespace DesktopListTool;
 
 internal static class DisplayLayoutIdentity
 {
-    public static string CurrentId
+    private static readonly Lazy<string> SessionId = new(CreateCurrentId);
+
+    public static string CurrentId => SessionId.Value;
+
+    private static string CreateCurrentId()
     {
-        get
-        {
-            var description = string.Join("|", Screen.AllScreens
-                .Select(screen => $"{screen.DeviceName}:{screen.Bounds.Width}x{screen.Bounds.Height}:{screen.WorkingArea.Width}x{screen.WorkingArea.Height}")
-                .OrderBy(value => value, StringComparer.OrdinalIgnoreCase));
-            return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(description)))[..16];
-        }
+        var description = string.Join("|", Screen.AllScreens
+            .Select(screen => $"{screen.DeviceName}:{screen.Bounds.Width}x{screen.Bounds.Height}:{screen.WorkingArea.Width}x{screen.WorkingArea.Height}")
+            .OrderBy(value => value, StringComparer.OrdinalIgnoreCase));
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(description)))[..16];
     }
 
     public static string CurrentProfileKey => $@"Software\DesktopListTool\Layouts\{CurrentId}";
