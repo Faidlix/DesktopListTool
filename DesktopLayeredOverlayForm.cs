@@ -591,14 +591,11 @@ internal sealed class DesktopLayeredOverlayForm : Form
             graphics.Clear(Color.Transparent);
             graphics.SmoothingMode = SmoothingMode.AntiAlias;
             graphics.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
-            using var inputHitBrush = _customList is null ? null : OverlayStyleRendering.CreateInputHitBrush(_backgroundColor);
-            if (inputHitBrush is not null)
-            {
-                if (_style.CornerRadius > 0)
-                    graphics.FillRoundedRectangle(inputHitBrush, ClientRectangle, Math.Min(_style.CornerRadius, Math.Min(ClientSize.Width, ClientSize.Height) / 2));
-                else
-                    graphics.FillRectangle(inputHitBrush, ClientRectangle);
-            }
+            using var inputHitBrush = OverlayStyleRendering.CreateInputHitBrush(_backgroundColor);
+            if (_style.CornerRadius > 0)
+                graphics.FillRoundedRectangle(inputHitBrush, ClientRectangle, Math.Min(_style.CornerRadius, Math.Min(ClientSize.Width, ClientSize.Height) / 2));
+            else
+                graphics.FillRectangle(inputHitBrush, ClientRectangle);
             using var hitTargetBrush = OverlayStyleRendering.CreateBackgroundBrush(ClientRectangle, _style, _backgroundColor);
             if (_style.CornerRadius > 0)
                 graphics.FillRoundedRectangle(hitTargetBrush, ClientRectangle, Math.Min(_style.CornerRadius, Math.Min(ClientSize.Width, ClientSize.Height) / 2));
@@ -1642,6 +1639,8 @@ internal sealed class DesktopLayeredOverlayForm : Form
     protected override void WndProc(ref Message message)
     {
         const int WmNcHitTest = 0x0084;
+        const int WmNcLButtonDown = 0x00A1;
+        const int WmNcRButtonUp = 0x00A5;
         const int WmMouseActivate = 0x0021;
         const int WmMoving = 0x0216;
         const int WmSizing = 0x0214;
@@ -1652,6 +1651,19 @@ internal sealed class DesktopLayeredOverlayForm : Form
         {
             message.Result = (IntPtr)3;
             EnsureDesktopZOrder();
+            return;
+        }
+        if (message.Msg == WmNcLButtonDown && _frameVisible)
+            ActivateList();
+        if (message.Msg == WmNcRButtonUp && _frameVisible)
+        {
+            var contextScreenPoint = new Point(
+                (short)(message.LParam.ToInt64() & 0xFFFF),
+                (short)((message.LParam.ToInt64() >> 16) & 0xFFFF));
+            _lastContextMenuScreenPoint = contextScreenPoint;
+            ActivateList();
+            _menu?.Show(this, PointToClient(contextScreenPoint));
+            message.Result = IntPtr.Zero;
             return;
         }
         if (message.Msg == WmMoving && message.LParam != IntPtr.Zero)
