@@ -92,12 +92,32 @@ internal static class Program
                 _ => !StartupManager.IsEnabled
             };
             StartupManager.SetEnabled(enabled);
-            Console.WriteLine(enabled ? "開機自動啟動已啟用" : "開機自動啟動已停用");
+            var applied = StartupManager.IsEnabled == enabled;
+            Console.WriteLine(applied
+                ? enabled ? "開機自動啟動已啟用" : "開機自動啟動已停用"
+                : "無法變更開機自動啟動設定");
+            Environment.ExitCode = applied ? 0 : 1;
             return;
         }
 
         var startupRun = args.Contains("--startup-run", StringComparer.OrdinalIgnoreCase);
+        if (startupRun)
+            WaitForDesktopShell(DesktopViewController.FindDesktopListView, Thread.Sleep);
         RunOverlay(ListItemSizeSettings.Load());
+    }
+
+    internal static bool WaitForDesktopShell(Func<IntPtr> findDesktop, Action<int> delay, int maxAttempts = 60)
+    {
+        for (var attempt = 0; attempt < maxAttempts; attempt++)
+        {
+            if (findDesktop() != IntPtr.Zero)
+            {
+                delay(1000);
+                return true;
+            }
+            delay(250);
+        }
+        return false;
     }
 
     private static void RunOverlay(ListItemSize size)
@@ -164,6 +184,7 @@ internal sealed class DesktopViewApplicationContext : ApplicationContext
 
     public DesktopViewApplicationContext(ListItemSize initialSize)
     {
+        StartupManager.MigrateLegacyRegistration();
         _overlay = new DesktopLayeredOverlayForm(initialSize);
         _overlay.FormClosed += (_, _) => ExitThread();
         _overlay.AddFolderRequested += (_, _) => ChooseFolder();
@@ -924,36 +945,122 @@ internal static class StartupManager
 {
     private const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
     private const string ValueName = "DesktopListTool";
+    private static string StartupShortcutPath => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.Startup), "DesktopListTool.lnk");
 
-    public static bool IsEnabled
+    public static bool IsEnabled => IsStartupShortcutCurrent() || HasLegacyRegistration();
+
+    public static void MigrateLegacyRegistration()
     {
-        get
-        {
-            try
-            {
-                using var key = Registry.CurrentUser.OpenSubKey(RunKey);
-                return key?.GetValue(ValueName) is string value && !string.IsNullOrWhiteSpace(value);
-            }
-            catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException)
-            {
-                return false;
-            }
-        }
+        if (!HasLegacyRegistration() || !LegacyRegistrationTargetsCurrentExecutable() || IsStartupShortcutCurrent())
+            return;
+        if (CreateStartupShortcut())
+            DeleteLegacyRegistration();
     }
 
     public static void SetEnabled(bool enabled)
     {
+        if (enabled)
+        {
+            if (CreateStartupShortcut())
+                DeleteLegacyRegistration();
+            return;
+        }
+        DeleteStartupShortcut();
+        DeleteLegacyRegistration();
+    }
+
+    private static bool IsStartupShortcutCurrent()
+    {
+        if (!File.Exists(StartupShortcutPath)) return false;
+        object? shell = null;
+        object? shortcut = null;
+        try
+        {
+            var shellType = Type.GetTypeFromProgID("WScript.Shell");
+            if (shellType is null) return false;
+            shell = Activator.CreateInstance(shellType);
+            if (shell is null) return false;
+            shortcut = shell.GetType().InvokeMember("CreateShortcut", System.Reflection.BindingFlags.InvokeMethod, null, shell, [StartupShortcutPath]);
+            if (shortcut is null) return false;
+            var targetPath = shortcut.GetType().InvokeMember("TargetPath", System.Reflection.BindingFlags.GetProperty, null, shortcut, null) as string;
+            var arguments = shortcut.GetType().InvokeMember("Arguments", System.Reflection.BindingFlags.GetProperty, null, shortcut, null) as string;
+            return string.Equals(Path.GetFullPath(targetPath ?? ""), Path.GetFullPath(Application.ExecutablePath), StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(arguments?.Trim(), "--startup-run", StringComparison.OrdinalIgnoreCase);
+        }
+        catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException or IOException or COMException or System.Reflection.TargetInvocationException or ArgumentException)
+        {
+            return false;
+        }
+        finally { ReleaseComObject(shortcut); ReleaseComObject(shell); }
+    }
+
+    private static bool CreateStartupShortcut()
+    {
+        object? shell = null;
+        object? shortcut = null;
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(StartupShortcutPath)!);
+            var shellType = Type.GetTypeFromProgID("WScript.Shell");
+            if (shellType is null) return false;
+            shell = Activator.CreateInstance(shellType);
+            if (shell is null) return false;
+            shortcut = shell.GetType().InvokeMember("CreateShortcut", System.Reflection.BindingFlags.InvokeMethod, null, shell, [StartupShortcutPath]);
+            if (shortcut is null) return false;
+            var shortcutType = shortcut.GetType();
+            shortcutType.InvokeMember("TargetPath", System.Reflection.BindingFlags.SetProperty, null, shortcut, [Application.ExecutablePath]);
+            shortcutType.InvokeMember("Arguments", System.Reflection.BindingFlags.SetProperty, null, shortcut, ["--startup-run"]);
+            shortcutType.InvokeMember("WorkingDirectory", System.Reflection.BindingFlags.SetProperty, null, shortcut, [Path.GetDirectoryName(Application.ExecutablePath) ?? ""]);
+            shortcutType.InvokeMember("Description", System.Reflection.BindingFlags.SetProperty, null, shortcut, ["登入後啟動桌面清單"]);
+            shortcutType.InvokeMember("Save", System.Reflection.BindingFlags.InvokeMethod, null, shortcut, null);
+            return IsStartupShortcutCurrent();
+        }
+        catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException or IOException or COMException or System.Reflection.TargetInvocationException or ArgumentException)
+        {
+            return false;
+        }
+        finally { ReleaseComObject(shortcut); ReleaseComObject(shell); }
+    }
+
+    private static bool HasLegacyRegistration() => !string.IsNullOrWhiteSpace(ReadLegacyRegistration());
+
+    private static bool LegacyRegistrationTargetsCurrentExecutable()
+    {
+        var value = ReadLegacyRegistration();
+        return value?.Contains(Application.ExecutablePath, StringComparison.OrdinalIgnoreCase) == true;
+    }
+
+    private static string? ReadLegacyRegistration()
+    {
+        try
+        {
+            using var key = Registry.CurrentUser.OpenSubKey(RunKey);
+            return key?.GetValue(ValueName) as string;
+        }
+        catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException) { return null; }
+    }
+
+    private static void DeleteLegacyRegistration()
+    {
         try
         {
             using var key = Registry.CurrentUser.CreateSubKey(RunKey);
-            if (enabled)
-                key.SetValue(ValueName, $"\"{Application.ExecutablePath}\" --startup-run", RegistryValueKind.String);
-            else
-                key.DeleteValue(ValueName, throwOnMissingValue: false);
+            key.DeleteValue(ValueName, throwOnMissingValue: false);
         }
-        catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException)
-        {
-        }
+        catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException) { }
+    }
+
+    private static void DeleteStartupShortcut()
+    {
+        try { File.Delete(StartupShortcutPath); }
+        catch (Exception ex) when (ex is System.Security.SecurityException or UnauthorizedAccessException or IOException) { }
+    }
+
+    private static void ReleaseComObject(object? value)
+    {
+        if (value is not null && Marshal.IsComObject(value))
+            Marshal.FinalReleaseComObject(value);
     }
 }
 
@@ -1353,6 +1460,11 @@ internal static class SmokeTests
             Assert(desktopHandle != IntPtr.Zero, "desktop list view found");
             var current = DesktopViewController.GetCurrentView();
             Assert(current != DesktopView.Unknown, "desktop view readable");
+
+            var shellProbes = 0;
+            var shellDelays = new List<int>();
+            Assert(Program.WaitForDesktopShell(() => ++shellProbes >= 3 ? (IntPtr)1 : IntPtr.Zero, shellDelays.Add, 4) &&
+                shellDelays.SequenceEqual([250, 250, 1000]), "startup waits for Explorer desktop readiness before showing overlays");
 
             var workArea = new Rectangle(0, 0, 1920, 1040);
             Assert(DesktopLayeredOverlayForm.ConstrainRectangle(new Rectangle(9, 200, 400, 500), workArea).X == 9, "inside edge remains free");
