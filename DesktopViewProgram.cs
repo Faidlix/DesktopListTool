@@ -1572,6 +1572,14 @@ internal static class SmokeTests
             File.WriteAllText(secondReference, "second"); File.WriteAllText(thirdReference, "third");
             var referenced = DesktopOverlayEntry.LoadPaths([referenceFile]);
             Assert(referenced.Count == 1 && File.Exists(referenceFile), "custom list references without moving source");
+            using (var transparentHitOverlay = new DesktopLayeredOverlayForm(ListItemSize.Standard,
+                defaultBounds: new Rectangle(currentScreen.WorkingArea.Left + 80, currentScreen.WorkingArea.Top + 80, 420, 420),
+                customList: new CustomListData { Paths = [referenceFile] }))
+            {
+                var hitBounds = transparentHitOverlay.VisibleContentHitBoundsForTest();
+                Assert(!hitBounds.IsEmpty && hitBounds.Height < transparentHitOverlay.ClientSize.Height,
+                    "transparent list input surface covers content without intercepting unused trailing desktop space");
+            }
             Assert(NativeShellContextMenu.ProbeIsolated(referenceFile), "isolated native shell context menu probe succeeds");
             var previousFloatingQa = Environment.GetEnvironmentVariable("DESKTOP_LIST_QA_FLOATING");
             Environment.SetEnvironmentVariable("DESKTOP_LIST_QA_FLOATING", "1");
@@ -1704,6 +1712,16 @@ internal static class SmokeTests
                 Directory.CreateDirectory(source);
                 var file = Path.Combine(source, "drag.txt");
                 File.WriteAllText(file, "drag-copy-move");
+                var lockedFile = Path.Combine(source, "locked.txt");
+                File.WriteAllText(lockedFile, "locked");
+                using (var heldFile = new FileStream(lockedFile, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+                {
+                    heldFile.Flush(flushToDisk: true);
+                    var deleteError = FileLockDiagnostics.CreateRecycleBinException(lockedFile, 32);
+                    Assert(deleteError.Message.Contains(Path.GetFileName(lockedFile), StringComparison.Ordinal),
+                        "locked delete target reports a contextual error without terminating the owner");
+                }
+                File.Delete(lockedFile);
                 var sameFolderCopies = DesktopLayeredOverlayForm.DuplicatePaths([file], source);
                 Assert(sameFolderCopies.Count == 1 && File.Exists(sameFolderCopies[0]) && File.Exists(file) && Path.GetFileName(sameFolderCopies[0]).Contains("複製"), "ctrl drag on the same list creates a uniquely named physical copy");
                 Assert(DesktopLayeredOverlayForm.PastePathsIntoDirectory([file], source, move: false) &&

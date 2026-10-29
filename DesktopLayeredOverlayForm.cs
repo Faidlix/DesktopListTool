@@ -15,7 +15,7 @@ namespace DesktopListTool;
 internal sealed class DesktopLayeredOverlayForm : Form
 {
     private const int ContentPadding = 10;
-    private readonly System.Windows.Forms.Timer _hoverTimer = new() { Interval = 100 };
+    private readonly System.Windows.Forms.Timer _hoverTimer = new() { Interval = 50 };
     private readonly List<LayeredEntry> _entries = [];
     private readonly HashSet<string> _excludedPaths = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _referencePaths = new(StringComparer.OrdinalIgnoreCase);
@@ -31,6 +31,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
     private int _columnWidth;
     private int _scrollOffset;
     private int _hoveredIndex = -1;
+    private int _pendingHoveredIndex = -1;
     private int _selectedIndex = -1;
     private bool _listSelected;
     private bool _frameVisible;
@@ -122,10 +123,15 @@ internal sealed class DesktopLayeredOverlayForm : Form
         SystemEvents.UserPreferenceChanged += HandleUserPreferenceChanged;
 
         _menu = BuildContextMenu();
-        _hoverTimer.Tick += (_, _) => UpdateFrameVisibility();
+        _hoverTimer.Tick += (_, _) =>
+        {
+            UpdateFrameVisibility();
+            if (_pendingHoveredIndex != _hoveredIndex)
+                SetHoveredIndex(_pendingHoveredIndex);
+        };
         _hoverTimer.Start();
         MouseMove += HandleMouseMove;
-        MouseLeave += (_, _) => SetHoveredIndex(-1);
+        MouseLeave += (_, _) => _pendingHoveredIndex = -1;
         MouseDown += HandleMouseDown;
         MouseUp += HandleMouseUp;
         MouseDoubleClick += HandleMouseDoubleClick;
@@ -363,7 +369,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
     {
         RevealFrame();
         UpdateResizeHover(e.Location);
-        SetHoveredIndex(GetEntryIndexAt(e.Location));
+        _pendingHoveredIndex = GetEntryIndexAt(e.Location);
         if (e.Button == MouseButtons.Left && _dragCandidateIndex >= 0 &&
             Math.Abs(e.X - _dragStart.X) + Math.Abs(e.Y - _dragStart.Y) >= SystemInformation.DragSize.Width / 2)
             BeginItemDrag(_dragCandidateIndex);
@@ -436,7 +442,8 @@ internal sealed class DesktopLayeredOverlayForm : Form
         else
             _scrollOffset -= Math.Sign(e.Delta) * _rowHeight * 3;
         ClampScroll();
-        SetHoveredIndex(GetEntryIndexAt(PointToClient(Cursor.Position)));
+        _pendingHoveredIndex = GetEntryIndexAt(PointToClient(Cursor.Position));
+        SetHoveredIndex(_pendingHoveredIndex);
         RenderLayer();
     }
 
@@ -576,7 +583,10 @@ internal sealed class DesktopLayeredOverlayForm : Form
         _frameVisible = visible;
         _resizeHoverCorner = corner;
         if (!visible)
+        {
             _hoveredIndex = -1;
+            _pendingHoveredIndex = -1;
+        }
         RenderLayer();
     }
 
@@ -591,11 +601,7 @@ internal sealed class DesktopLayeredOverlayForm : Form
             graphics.Clear(Color.Transparent);
             graphics.SmoothingMode = SmoothingMode.AntiAlias;
             graphics.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
-            using var inputHitBrush = OverlayStyleRendering.CreateInputHitBrush(_backgroundColor);
-            if (_style.CornerRadius > 0)
-                graphics.FillRoundedRectangle(inputHitBrush, ClientRectangle, Math.Min(_style.CornerRadius, Math.Min(ClientSize.Width, ClientSize.Height) / 2));
-            else
-                graphics.FillRectangle(inputHitBrush, ClientRectangle);
+            DrawInputHitSurface(graphics);
             using var hitTargetBrush = OverlayStyleRendering.CreateBackgroundBrush(ClientRectangle, _style, _backgroundColor);
             if (_style.CornerRadius > 0)
                 graphics.FillRoundedRectangle(hitTargetBrush, ClientRectangle, Math.Min(_style.CornerRadius, Math.Min(ClientSize.Width, ClientSize.Height) / 2));
@@ -638,6 +644,45 @@ internal sealed class DesktopLayeredOverlayForm : Form
         }
         ApplyLayeredBitmap(bitmap);
     }
+
+    private void DrawInputHitSurface(Graphics graphics)
+    {
+        using var inputHitBrush = OverlayStyleRendering.CreateInputHitBrush(_backgroundColor);
+        var hasVisibleBackground = _style.BackgroundOpacity > 0 || (_style.GradientEnabled && _style.GradientOpacity > 0);
+        if (hasVisibleBackground)
+        {
+            if (_style.CornerRadius > 0)
+                graphics.FillRoundedRectangle(inputHitBrush, ClientRectangle, Math.Min(_style.CornerRadius, Math.Min(ClientSize.Width, ClientSize.Height) / 2));
+            else
+                graphics.FillRectangle(inputHitBrush, ClientRectangle);
+            return;
+        }
+
+        var contentBounds = GetVisibleContentHitBounds();
+        if (!contentBounds.IsEmpty)
+            graphics.FillRectangle(inputHitBrush, contentBounds);
+
+        using var framePen = new Pen(inputHitBrush, 12F) { Alignment = PenAlignment.Inset };
+        var frameBounds = new Rectangle(0, 0, Math.Max(1, ClientSize.Width - 1), Math.Max(1, ClientSize.Height - 1));
+        if (_style.CornerRadius > 0)
+            graphics.DrawRoundedRectangle(framePen, frameBounds, Math.Min(_style.CornerRadius, Math.Min(frameBounds.Width, frameBounds.Height) / 2));
+        else
+            graphics.DrawRectangle(framePen, frameBounds);
+    }
+
+    private Rectangle GetVisibleContentHitBounds()
+    {
+        var result = Rectangle.Empty;
+        for (var index = 0; index < _entries.Count; index++)
+        {
+            var bounds = Rectangle.Intersect(GetEntryBounds(index), ClientRectangle);
+            if (bounds.IsEmpty) continue;
+            result = result.IsEmpty ? bounds : Rectangle.Union(result, bounds);
+        }
+        return result;
+    }
+
+    internal Rectangle VisibleContentHitBoundsForTest() => GetVisibleContentHitBounds();
 
     private void UpdateResizeHover(Point point)
     {
@@ -1446,18 +1491,37 @@ internal sealed class DesktopLayeredOverlayForm : Form
         var changed = false;
         foreach (var path in paths.Where(value => !string.Equals(value, DesktopOverlayEntry.RecycleBinPath, StringComparison.OrdinalIgnoreCase)))
         {
-            if (Directory.Exists(path))
-            {
-                Microsoft.VisualBasic.FileIO.FileSystem.DeleteDirectory(path, Microsoft.VisualBasic.FileIO.UIOption.OnlyErrorDialogs, Microsoft.VisualBasic.FileIO.RecycleOption.SendToRecycleBin);
-                changed = true;
-            }
-            else if (File.Exists(path))
-            {
-                Microsoft.VisualBasic.FileIO.FileSystem.DeleteFile(path, Microsoft.VisualBasic.FileIO.UIOption.OnlyErrorDialogs, Microsoft.VisualBasic.FileIO.RecycleOption.SendToRecycleBin);
-                changed = true;
-            }
+            if (!Directory.Exists(path) && !File.Exists(path)) continue;
+            var error = MovePathToRecycleBinWithRetry(path);
+            if (error != 0)
+                throw FileLockDiagnostics.CreateRecycleBinException(path, error);
+            changed = true;
         }
         return changed;
+    }
+
+    private static int MovePathToRecycleBinWithRetry(string path)
+    {
+        const uint FoDelete = 3;
+        const ushort FofSilent = 0x0004;
+        const ushort FofNoConfirmation = 0x0010;
+        const ushort FofAllowUndo = 0x0040;
+        const ushort FofNoErrorUi = 0x0400;
+        var error = 0;
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            var operation = new ShellFileOperation
+            {
+                Function = FoDelete,
+                From = Path.GetFullPath(path) + '\0' + '\0',
+                Flags = FofSilent | FofNoConfirmation | FofAllowUndo | FofNoErrorUi
+            };
+            error = SHFileOperation(ref operation);
+            if (error == 0 && operation.AnyOperationsAborted == 0)
+                return 0;
+            if (attempt < 2) Thread.Sleep(150);
+        }
+        return error == 0 ? 1223 : error;
     }
 
     private static void MovePath(string source, string destination, bool isDirectory,
@@ -1831,8 +1895,22 @@ internal sealed class DesktopLayeredOverlayForm : Form
         public byte AlphaFormat;
     }
 
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct ShellFileOperation
+    {
+        public IntPtr Window;
+        public uint Function;
+        [MarshalAs(UnmanagedType.LPWStr)] public string From;
+        [MarshalAs(UnmanagedType.LPWStr)] public string? To;
+        public ushort Flags;
+        public int AnyOperationsAborted;
+        public IntPtr NameMappings;
+        [MarshalAs(UnmanagedType.LPWStr)] public string? ProgressTitle;
+    }
+
     [DllImport("user32.dll")]
     private static extern bool UpdateLayeredWindow(IntPtr window, IntPtr destinationDc, ref NativePoint destination, ref NativeSize size, IntPtr sourceDc, ref NativePoint source, int colorKey, ref BlendFunction blend, int flags);
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)] private static extern int SHFileOperation(ref ShellFileOperation operation);
     [DllImport("user32.dll")] private static extern IntPtr GetDC(IntPtr window);
     [DllImport("user32.dll")] private static extern int ReleaseDC(IntPtr window, IntPtr dc);
     [DllImport("gdi32.dll")] private static extern IntPtr CreateCompatibleDC(IntPtr dc);
